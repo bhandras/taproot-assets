@@ -122,17 +122,35 @@ CREATE TABLE IF NOT EXISTS managed_utxos (
     txn_id INTEGER NOT NULL REFERENCES chain_txns(txn_id)
 );
 
+CREATE TABLE IF NOT EXISTS script_keys (
+    script_key_id INTEGER PRIMARY KEY,
+
+    -- The actual internal key here that we hold the private key for. Applying
+    -- the tweak to this gives us the tweaked_script_key.
+    internal_key_id INTEGER NOT NULL REFERENCES internal_keys(key_id),
+
+    -- The script key after applying the tweak. This is what goes directly in
+    -- the asset TLV.
+    tweaked_script_key BLOB NOT NULL UNIQUE CHECK(length(tweaked_script_key) == 33),
+
+    -- An optional tweak for the script_key. If NULL, the raw_key may be
+    -- tweaked BIP0086 style.
+    tweak BLOB
+);
+
 -- assets is the main table that stores (or references) the complete asset
 -- information. This represents the latest state of any given asset, as it also
 -- references the managed_utxos table which stores the current location of the
 -- asset, along with the sibling taproot hash needed to properly reveal and
 -- spend the asset.
 CREATE TABLE IF NOT EXISTS assets (
-    asset_id INTEGER PRIMARY KEY REFERENCES genesis_assets(gen_asset_id),
+    asset_id INTEGER PRIMARY KEY,
+    
+    genesis_id INTEGER NOT NULL REFERENCES genesis_assets(gen_asset_id),
 
     version INTEGER NOT NULL,
 
-    script_key_id INTEGER NOT NULL REFERENCES internal_keys(key_id),
+    script_key_id INTEGER NOT NULL REFERENCES script_keys(script_key_id),
 
     -- TODO(roasbeef): don't need this after all?
     asset_family_sig_id INTEGER REFERENCES asset_family_sigs(sig_id),
@@ -147,12 +165,14 @@ CREATE TABLE IF NOT EXISTS assets (
 
     relative_lock_time INTEGER,
 
-    -- TODO(roasbeef): new table?
+    -- TODO(roasbeef): move into new table, then 1:1 in the new table
     split_commitment_root_hash BLOB,
 
     split_commitment_root_value BIGINT,
 
-    anchor_utxo_id INTEGER REFERENCES managed_utxos(utxo_id)
+    anchor_utxo_id INTEGER REFERENCES managed_utxos(utxo_id),
+    
+    UNIQUE(genesis_id, script_key_id)
 );
 
 -- asset_witnesses stores the set of input witnesses for the latest state of an
@@ -169,7 +189,9 @@ CREATE TABLE IF NOT EXISTS asset_witnesses (
 
     prev_script_key BLOB NOT NULL,
 
-    witness_stack BLOB NOT NULL,
+    -- The witness stack can be NULL for genesis assets where (for now) they
+    -- have no witnesses, but we use this to be able to detect them as such.
+    witness_stack BLOB,
 
     split_commitment_proof BLOB
 );
@@ -188,7 +210,7 @@ CREATE TABLE IF NOT EXISTS asset_proofs (
 );
 
 -- asset_seedlings are budding assets: the contain the base asset information
--- need to create an asset, but don' tyet have a genesis point.
+-- need to create an asset, but doesn't yet have a genesis point.
 CREATE TABLE IF NOT EXISTS asset_seedlings (
     seedling_id INTEGER PRIMARY KEY,
 
@@ -204,7 +226,7 @@ CREATE TABLE IF NOT EXISTS asset_seedlings (
 
     emission_enabled BOOLEAN NOT NULL,
 
-    asset_id INTEGER REFERENCES genesis_assets(gen_asset_id),
+    genesis_id INTEGER REFERENCES genesis_assets(gen_asset_id),
 
     batch_id INTEGER NOT NULL REFERENCES asset_minting_batches(batch_id)
 );
@@ -232,3 +254,31 @@ CREATE TABLE IF NOT EXISTS asset_minting_batches (
 CREATE INDEX IF NOT EXISTS batch_state_lookup on asset_minting_batches (batch_state);
 
 -- TODO(roasbeef): need on delete cascade for all these?
+
+-- This view is used to fetch the base asset information from disk based on
+-- the raw key of the batch that will ultimately create this set of assets.
+-- To do so, we'll need to traverse a few tables to join the set of assets
+-- with the genesis points, then with the batches that reference this
+-- points, to the internal key that reference the batch, then restricted
+-- for internal keys that match our main batch key.
+CREATE VIEW genesis_info_view AS
+    SELECT
+        gen_asset_id, asset_id, asset_tag, meta_data, output_index, asset_type,
+        genesis_points.prev_out prev_out
+    FROM genesis_assets
+    JOIN genesis_points
+        ON genesis_assets.genesis_point_id = genesis_points.genesis_id;
+
+-- This view is used to perform a series of joins that allow us to extract
+-- the family key information, as well as the family sigs for the series of
+-- assets we care about. We obtain only the assets found in the batch
+-- above, with the WHERE query at the bottom.
+CREATE VIEW key_fam_info_view AS
+    SELECT
+        sig_id, gen_asset_id, genesis_sig, tweaked_fam_key, raw_key, key_index, key_family
+    FROM asset_family_sigs sigs
+    JOIN asset_families fams
+        ON sigs.key_fam_id = fams.family_id
+    JOIN internal_keys keys
+        ON keys.key_id = fams.internal_key_id
+    WHERE sigs.gen_asset_id IN (SELECT gen_asset_id FROM genesis_info_view);

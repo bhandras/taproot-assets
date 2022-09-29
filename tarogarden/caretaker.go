@@ -3,6 +3,7 @@ package tarogarden
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,7 +96,7 @@ type BatchCaretaker struct {
 // TODO(roasbeef): rename to Cultivator?
 func NewBatchCaretaker(cfg *BatchCaretakerConfig) *BatchCaretaker {
 	return &BatchCaretaker{
-		batchKey:  NewBatchKey(cfg.Batch.BatchKey.PubKey),
+		batchKey:  asset.ToSerialized(cfg.Batch.BatchKey.PubKey),
 		cfg:       cfg,
 		confEvent: make(chan *chainntnfs.TxConfirmation, 1),
 		ContextGuard: &chanutils.ContextGuard{
@@ -186,6 +187,7 @@ func (b *BatchCaretaker) taroCultivator() {
 		}
 
 		b.cfg.SignalCompletion()
+		return
 	}
 
 	// Our task as a cultivator is pretty simple: we advance our state
@@ -351,7 +353,8 @@ func (b *BatchCaretaker) seedlingsToAssetSprouts(ctx context.Context,
 		}
 
 		newAsset, err := asset.New(
-			assetGen, amount, 0, 0, scriptKey, familyKey,
+			assetGen, amount, 0, 0,
+			asset.NewScriptKeyBIP0086(scriptKey), familyKey,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create new asset: %v",
@@ -531,8 +534,18 @@ func (b *BatchCaretaker) stateStep(currentState BatchState) (BatchState, error) 
 		// operations above
 		ctx, cancel = b.WithCtxQuit()
 		defer cancel()
-		err = b.cfg.Wallet.ImportPubKey(ctx, mintingOutputKey)
-		if err != nil {
+		_, err = b.cfg.Wallet.ImportTaprootOutput(ctx, mintingOutputKey)
+		switch {
+		case err == nil:
+			break
+
+		// On restart, we'll get an error that the output has already
+		// been added to the wallet, so we'll catch this now and move
+		// along if so.
+		case strings.Contains(err.Error(), "already exists"):
+			break
+
+		case err != nil:
 			return 0, fmt.Errorf("unable to import key: %w", err)
 		}
 
@@ -654,20 +667,45 @@ func (b *BatchCaretaker) stateStep(currentState BatchState) (BatchState, error) 
 		// Now that the minting transaction has been confirmed, we'll
 		// need to create the series of proof file blobs for each of
 		// the assets.
+		//
+		// TODO(guggero): Add exclusion proofs once FundPsbt actually
+		// returns a transaction with P2TR change outputs and also
+		// decorates the output with the internal key correctly.
 		mintingProofs, err := proof.NewMintingBlobs(&proof.MintParams{
-			Block:       confInfo.Block,
-			Tx:          confInfo.Tx,
-			TxIndex:     int(confInfo.TxIndex),
-			OutputIndex: int(b.anchorOutputIndex),
-			InternalKey: b.cfg.Batch.BatchKey.PubKey,
+			BaseProofParams: proof.BaseProofParams{
+				Block:       confInfo.Block,
+				Tx:          confInfo.Tx,
+				TxIndex:     int(confInfo.TxIndex),
+				OutputIndex: int(b.anchorOutputIndex),
+				InternalKey: b.cfg.Batch.BatchKey.PubKey,
+				TaroRoot:    b.cfg.Batch.RootAssetCommitment,
+			},
 			GenesisPoint: extractGenesisOutpoint(
 				b.cfg.Batch.GenesisPacket.Pkt.UnsignedTx,
 			),
-			TaroRoot: b.cfg.Batch.RootAssetCommitment,
 		})
 		if err != nil {
 			return 0, fmt.Errorf("unable to construct minting "+
 				"proofs: %v", err)
+		}
+
+		// Before we confirm the batch, we'll also update the on disk
+		// file system as well.
+		//
+		// TODO(roasbeef): rely on the upsert here instead
+		for _, newAsset := range b.cfg.Batch.RootAssetCommitment.CommittedAssets() {
+			assetID := newAsset.ID()
+			scriptKey := asset.ToSerialized(newAsset.ScriptKey.PubKey)
+			err := b.cfg.ProofFiles.ImportProofs(ctx, &proof.AnnotatedProof{
+				Locator: proof.Locator{
+					AssetID:   &assetID,
+					ScriptKey: *newAsset.ScriptKey.PubKey,
+				},
+				Blob: mintingProofs[scriptKey],
+			})
+			if err != nil {
+				return 0, fmt.Errorf("unable to insert proofs: %v", err)
+			}
 		}
 
 		err = b.cfg.Log.MarkBatchConfirmed(

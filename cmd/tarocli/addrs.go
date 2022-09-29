@@ -20,12 +20,13 @@ var addrCommands = []cli.Command{
 			newAddrCommand,
 			queryAddrsCommand,
 			decodeAddrCommand,
+			receivesAddrCommand,
 		},
 	},
 }
 
 const (
-	assetIDName = "asset_id"
+	genesisBootstrapInfo = "genesis_bootstrap_info"
 
 	keyFamName = "key_fam"
 
@@ -35,12 +36,13 @@ const (
 var newAddrCommand = cli.Command{
 	Name:        "new",
 	ShortName:   "n",
-	Usage:       "create a Taro address",
+	Usage:       "Create a Taro address",
 	Description: "Create a new Taro address to receive an asset on-chain",
 	Flags: []cli.Flag{
 		cli.StringFlag{
-			Name:  assetIDName,
-			Usage: "the asset ID of the asset to receive",
+			Name: genesisBootstrapInfo,
+			Usage: "the asset genesis bootstrap info of the " +
+				"asset to receive",
 		},
 		cli.StringFlag{
 			Name:  keyFamName,
@@ -49,10 +51,6 @@ var newAddrCommand = cli.Command{
 		cli.Uint64Flag{
 			Name:  amtName,
 			Usage: "the amt of the asset to receive",
-		},
-		cli.StringFlag{
-			Name:  assetTypeName,
-			Usage: "the type of the asset",
 		},
 	},
 	Action: newAddr,
@@ -64,14 +62,15 @@ func newAddr(ctx *cli.Context) error {
 	defer cleanUp()
 
 	switch {
-	case ctx.String(assetIDName) == "":
-		_ = cli.ShowCommandHelp(ctx, "mint")
+	case ctx.String(genesisBootstrapInfo) == "":
+		_ = cli.ShowCommandHelp(ctx, "new")
 		return nil
 	}
 
-	assetID, err := hex.DecodeString(ctx.String(assetIDName))
+	genInfo, err := hex.DecodeString(ctx.String(genesisBootstrapInfo))
 	if err != nil {
-		return fmt.Errorf("unable to decode asset ID: %v", err)
+		return fmt.Errorf("unable to decode asset genesis bootstrap "+
+			"info: %v", err)
 	}
 	keyFam, err := hex.DecodeString(ctx.String(keyFamName))
 	if err != nil {
@@ -79,10 +78,9 @@ func newAddr(ctx *cli.Context) error {
 	}
 
 	addr, err := client.NewAddr(ctxc, &tarorpc.NewAddrRequest{
-		AssetId:   assetID,
-		FamKey:    keyFam,
-		Amt:       ctx.Int64(amtName),
-		AssetType: parseAssetType(ctx),
+		GenesisBootstrapInfo: genInfo,
+		FamKey:               keyFam,
+		Amt:                  ctx.Int64(amtName),
 	})
 	if err != nil {
 		return fmt.Errorf("unable to make addr: %w", err)
@@ -170,10 +168,10 @@ func queryAddr(ctx *cli.Context) error {
 const addrName = "addr"
 
 var decodeAddrCommand = cli.Command{
-	Name:        "decode",
-	ShortName:   "d",
-	Usage:       "[--addr | addr]",
-	Description: "attempt to decode a taro addr",
+	Name:      "decode",
+	ShortName: "d",
+	ArgsUsage: "[--addr | addr]",
+	Usage:     "Attempt to decode a taro addr",
 	Flags: []cli.Flag{
 		cli.StringFlag{
 			Name:  addrName,
@@ -197,15 +195,54 @@ func decodeAddr(ctx *cli.Context) error {
 		addr = ctx.Args().First()
 
 	default:
-		_ = cli.ShowCommandHelp(ctx, "mint")
+		_ = cli.ShowCommandHelp(ctx, "decode")
 		return nil
 	}
 
-	resp, err := client.DecodeAddr(ctxc, &tarorpc.Addr{
+	resp, err := client.DecodeAddr(ctxc, &tarorpc.DecodeAddrRequest{
 		Addr: addr,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to decode addr: %w", err)
+	}
+
+	printRespJSON(resp)
+	return nil
+}
+
+var receivesAddrCommand = cli.Command{
+	Name:      "receives",
+	ShortName: "r",
+	ArgsUsage: "[--addr | addr]",
+	Usage:     "Show all inbound asset transfers",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  addrName,
+			Usage: "show transfers of a single address only",
+		},
+	},
+	Action: addrReceives,
+}
+
+func addrReceives(ctx *cli.Context) error {
+	ctxc := getContext()
+	client, cleanUp := getClient(ctx)
+	defer cleanUp()
+
+	var addr string
+	switch {
+	case ctx.String(addrName) != "":
+		addr = ctx.String(addrName)
+
+	case len(ctx.Args()) > 0:
+		addr = ctx.Args().First()
+	}
+
+	resp, err := client.AddrReceives(ctxc, &tarorpc.AddrReceivesRequest{
+		FilterAddr: addr,
+	})
+	if err != nil {
+		return fmt.Errorf("unable to query addr receives: %w", err)
 	}
 
 	printRespJSON(resp)

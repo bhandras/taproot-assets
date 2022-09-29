@@ -11,10 +11,8 @@ import (
 
 var (
 	zeroHash chainhash.Hash
-)
 
-func mintAssets(t *harnessTest) {
-	simpleAssets := []*tarorpc.MintAssetRequest{
+	simpleAssets = []*tarorpc.MintAssetRequest{
 		{
 			AssetType: tarorpc.AssetType_NORMAL,
 			Name:      "itestbuxx",
@@ -28,9 +26,7 @@ func mintAssets(t *harnessTest) {
 			Amount:    1,
 		},
 	}
-	rpcSimpleAssets := mintAssetsConfirmBatch(t, t.tarod, simpleAssets)
-
-	issuableAssets := []*tarorpc.MintAssetRequest{
+	issuableAssets = []*tarorpc.MintAssetRequest{
 		{
 			AssetType:      tarorpc.AssetType_NORMAL,
 			Name:           "itestbuxx-money-printer-brrr",
@@ -46,7 +42,16 @@ func mintAssets(t *harnessTest) {
 			EnableEmission: true,
 		},
 	}
+)
+
+func mintAssets(t *harnessTest) {
+	rpcSimpleAssets := mintAssetsConfirmBatch(t, t.tarod, simpleAssets)
 	rpcIssuableAssets := mintAssetsConfirmBatch(t, t.tarod, issuableAssets)
+
+	// Now that all our assets have been issued, we'll use the balance
+	// calls to ensure that we're able to retrieve the proper balance for
+	// them all.
+	assertAssetBalances(t, rpcSimpleAssets, rpcIssuableAssets)
 
 	// Make sure the proof files for the freshly minted assets can be
 	// retrieved and are fully valid.
@@ -161,6 +166,12 @@ func transferAssetProofs(t *harnessTest, src, dst *tarodHarness,
 	ctxt, cancel := context.WithTimeout(ctxb, defaultWaitTimeout)
 	defer cancel()
 
+	// TODO(roasbeef): modify import call, can't work as is
+	//  * proof file only contains the tweaked script key
+	//  * from that we don't know the internal key
+	//  * we can import the proof but it's useless as is, but lets this
+	//  itest work
+
 	for _, existingAsset := range assets {
 		gen := existingAsset.AssetGenesis
 		proofFile := assertAssetProofs(t.t, src, existingAsset)
@@ -185,5 +196,80 @@ func transferAssetProofs(t *harnessTest, src, dst *tarodHarness,
 			assetTypeCheck(existingAsset.AssetType),
 			assetAnchorCheck(*anchorTxHash, *anchorBlockHash),
 		)
+	}
+}
+
+func assertAssetBalances(t *harnessTest,
+	simpleAssets, issuableAssets []*tarorpc.Asset) {
+
+	t.t.Helper()
+
+	ctxb := context.Background()
+	ctxt, cancel := context.WithTimeout(ctxb, defaultWaitTimeout)
+	defer cancel()
+
+	// First, we'll ensure that we're able to get the balances of all the
+	// assets grouped by their asset IDs.
+	balanceReq := &tarorpc.ListBalancesRequest_AssetId{
+		AssetId: true,
+	}
+	assetIDBalances, err := t.tarod.ListBalances(
+		ctxt, &tarorpc.ListBalancesRequest{
+			GroupBy: balanceReq,
+		},
+	)
+	require.NoError(t.t, err)
+
+	var allAssets []*tarorpc.Asset
+	allAssets = append(allAssets, simpleAssets...)
+	allAssets = append(allAssets, issuableAssets...)
+
+	require.Equal(t.t, len(allAssets), len(assetIDBalances.AssetBalances))
+
+	for _, balance := range assetIDBalances.AssetBalances {
+		for _, rpcAsset := range allAssets {
+			if balance.AssetGenesis.Name == rpcAsset.AssetGenesis.Name {
+				require.Equal(
+					t.t, balance.Balance, rpcAsset.Amount,
+				)
+				require.Equal(
+					t.t,
+					balance.AssetGenesis.GenesisBootstrapInfo,
+					rpcAsset.AssetGenesis.GenesisBootstrapInfo,
+				)
+			}
+		}
+	}
+
+	// We'll also ensure that we're able to get the balance by key family
+	// for all the assets that have one specified.
+	famBalanceReq := &tarorpc.ListBalancesRequest_FamKey{
+		FamKey: true,
+	}
+	assetFamBalances, err := t.tarod.ListBalances(
+		ctxt, &tarorpc.ListBalancesRequest{
+			GroupBy: famBalanceReq,
+		},
+	)
+	require.NoError(t.t, err)
+
+	require.Equal(
+		t.t, len(issuableAssets),
+		len(assetFamBalances.AssetFamilyBalances),
+	)
+
+	for _, balance := range assetFamBalances.AssetBalances {
+		for _, rpcAsset := range issuableAssets {
+			if balance.AssetGenesis.Name == rpcAsset.AssetGenesis.Name {
+				require.Equal(
+					t.t, balance.Balance, rpcAsset.Amount,
+				)
+				require.Equal(
+					t.t,
+					balance.AssetGenesis.GenesisBootstrapInfo,
+					rpcAsset.AssetGenesis.GenesisBootstrapInfo,
+				)
+			}
+		}
 	}
 }

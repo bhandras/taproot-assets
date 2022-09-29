@@ -188,7 +188,7 @@ func extractPathArgs(ctx *cli.Context) (string, string, error) {
 	// determine the correct path to the macaroon when not specified.
 	network := strings.ToLower(ctx.GlobalString("network"))
 	switch network {
-	case "mainnet", "testnet", "regtest", "simnet", "signet":
+	case "testnet", "regtest", "simnet", "signet":
 	default:
 		return "", "", fmt.Errorf("unknown network: %v", network)
 	}
@@ -236,7 +236,7 @@ func main() {
 		cli.StringFlag{
 			Name:  "rpcserver",
 			Value: defaultRPCHostPort,
-			Usage: "The host:port of LN daemon.",
+			Usage: "The host:port of taro daemon.",
 		},
 		cli.StringFlag{
 			Name:      "tarodir",

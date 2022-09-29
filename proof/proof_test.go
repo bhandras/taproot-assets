@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taro/asset"
 	"github.com/lightninglabs/taro/commitment"
+	"github.com/lightninglabs/taro/internal/test"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/stretchr/testify/require"
 )
@@ -25,22 +26,6 @@ var (
 		Index: 1,
 	}
 )
-
-func randPrivKey(t *testing.T) *btcec.PrivateKey {
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-	return privKey
-}
-
-func schnorrPubKey(t *testing.T, privKey *btcec.PrivateKey) *btcec.PublicKey {
-	key, err := schnorr.ParsePubKey(schnorr.SerializePubKey(privKey.PubKey()))
-	require.NoError(t, err)
-	return key
-}
-
-func randPubKey(t *testing.T) *btcec.PublicKey {
-	return schnorrPubKey(t, randPrivKey(t))
-}
 
 func randGenesis(t *testing.T, assetType asset.Type) *asset.Genesis {
 	metadata := make([]byte, rand.Uint32()%32+1)
@@ -125,6 +110,13 @@ func assertEqualProof(t *testing.T, expected, actual *Proof) {
 		)
 	}
 	require.Equal(t, expected.ExclusionProofs, actual.ExclusionProofs)
+	if expected.SplitRootProof != nil {
+		assertEqualTaprootProof(
+			t, expected.SplitRootProof, actual.SplitRootProof,
+		)
+	} else {
+		require.Nil(t, actual.SplitRootProof)
+	}
 	for i := range expected.AdditionalInputs {
 		require.Equal(
 			t, expected.AdditionalInputs[i].Version,
@@ -142,17 +134,19 @@ func assertEqualProof(t *testing.T, expected, actual *Proof) {
 func TestProofEncoding(t *testing.T) {
 	t.Parallel()
 
-	oddTxBlock, _ := readTestData(t)
+	testBlocks := readTestData(t)
+	oddTxBlock := testBlocks[0]
 
 	txMerkleProof, err := NewTxMerkleProof(oddTxBlock.Transactions, 0)
 	require.NoError(t, err)
 
 	genesis := randGenesis(t, asset.Collectible)
 	familyKey := randFamilyKey(t, genesis)
+
 	commitment, assets, err := commitment.Mint(
 		*genesis, familyKey, &commitment.AssetDetails{
 			Type:             asset.Collectible,
-			ScriptKey:        pubToKeyDesc(randPubKey(t)),
+			ScriptKey:        pubToKeyDesc(test.RandPubKey(t)),
 			Amount:           nil,
 			LockTime:         1337,
 			RelativeLockTime: 6,
@@ -161,6 +155,17 @@ func TestProofEncoding(t *testing.T) {
 	require.NoError(t, err)
 	asset := assets[0]
 	asset.FamilyKey.RawKey = keychain.KeyDescriptor{}
+
+	// Empty the raw script key, since we only serialize the tweaked
+	// pubkey. We'll also force the main script key to be an x-only key as
+	// well.
+	asset.ScriptKey.PubKey, err = schnorr.ParsePubKey(
+		schnorr.SerializePubKey(asset.ScriptKey.PubKey),
+	)
+	require.NoError(t, err)
+
+	asset.ScriptKey.TweakedScriptKey = nil
+
 	_, commitmentProof, err := commitment.Proof(
 		asset.TaroCommitmentKey(), asset.AssetCommitmentKey(),
 	)
@@ -174,7 +179,7 @@ func TestProofEncoding(t *testing.T) {
 		Asset:         *asset,
 		InclusionProof: TaprootProof{
 			OutputIndex: 1,
-			InternalKey: randPubKey(t),
+			InternalKey: test.RandPubKey(t),
 			CommitmentProof: &CommitmentProof{
 				Proof: *commitmentProof,
 				TapSiblingPreimage: &TapscriptPreimage{
@@ -187,7 +192,7 @@ func TestProofEncoding(t *testing.T) {
 		ExclusionProofs: []TaprootProof{
 			{
 				OutputIndex: 2,
-				InternalKey: randPubKey(t),
+				InternalKey: test.RandPubKey(t),
 				CommitmentProof: &CommitmentProof{
 					Proof: *commitmentProof,
 					TapSiblingPreimage: &TapscriptPreimage{
@@ -199,7 +204,7 @@ func TestProofEncoding(t *testing.T) {
 			},
 			{
 				OutputIndex:     3,
-				InternalKey:     randPubKey(t),
+				InternalKey:     test.RandPubKey(t),
 				CommitmentProof: nil,
 				TapscriptProof: &TapscriptProof{
 					TapPreimage1: &TapscriptPreimage{
@@ -210,7 +215,24 @@ func TestProofEncoding(t *testing.T) {
 						SiblingPreimage: []byte{2},
 						SiblingType:     LeafPreimage,
 					},
+					BIP86: true,
 				},
+			},
+			{
+				OutputIndex:     4,
+				InternalKey:     test.RandPubKey(t),
+				CommitmentProof: nil,
+				TapscriptProof: &TapscriptProof{
+					BIP86: true,
+				},
+			},
+		},
+		SplitRootProof: &TaprootProof{
+			OutputIndex: 4,
+			InternalKey: test.RandPubKey(t),
+			CommitmentProof: &CommitmentProof{
+				Proof:              *commitmentProof,
+				TapSiblingPreimage: nil,
 			},
 		},
 		AdditionalInputs: []File{},
@@ -226,34 +248,33 @@ func TestProofEncoding(t *testing.T) {
 	assertEqualProof(t, &proof, &decodedProof)
 }
 
-func TestGenesisProofVerification(t *testing.T) {
-	t.Parallel()
+func genRandomGenesisWithProof(t *testing.T, assetType asset.Type,
+	amt *uint64) (Proof, *btcec.PrivateKey) {
 
-	genesisPrivKey := randPrivKey(t)
-	genesisScriptKey := txscript.ComputeTaprootKeyNoScript(
-		genesisPrivKey.PubKey(),
-	)
-	assetGenesis := randGenesis(t, asset.Collectible)
+	t.Helper()
+
+	genesisPrivKey := test.RandPrivKey(t)
+	assetGenesis := randGenesis(t, assetType)
 	assetFamilyKey := randFamilyKey(t, assetGenesis)
-	commitment, assets, err := commitment.Mint(
+	taroCommitment, assets, err := commitment.Mint(
 		*assetGenesis, assetFamilyKey, &commitment.AssetDetails{
-			Type:             asset.Collectible,
-			ScriptKey:        pubToKeyDesc(genesisScriptKey),
-			Amount:           nil,
+			Type:             assetType,
+			ScriptKey:        pubToKeyDesc(genesisPrivKey.PubKey()),
+			Amount:           amt,
 			LockTime:         0,
 			RelativeLockTime: 0,
 		},
 	)
 	require.NoError(t, err)
 	genesisAsset := assets[0]
-	_, commitmentProof, err := commitment.Proof(
+	_, commitmentProof, err := taroCommitment.Proof(
 		genesisAsset.TaroCommitmentKey(),
 		genesisAsset.AssetCommitmentKey(),
 	)
 	require.NoError(t, err)
 
-	internalKey := schnorrPubKey(t, genesisPrivKey)
-	tapscriptRoot := commitment.TapscriptRoot(nil)
+	internalKey := test.SchnorrPubKey(t, genesisPrivKey)
+	tapscriptRoot := taroCommitment.TapscriptRoot(nil)
 	taprootKey := txscript.ComputeTaprootOutputKey(
 		internalKey, tapscriptRoot[:],
 	)
@@ -277,7 +298,7 @@ func TestGenesisProofVerification(t *testing.T) {
 	txMerkleProof, err := NewTxMerkleProof([]*wire.MsgTx{genesisTx}, 0)
 	require.NoError(t, err)
 
-	proof := Proof{
+	return Proof{
 		PrevOut:       genesisTx.TxIn[0].PreviousOutPoint,
 		BlockHeader:   *blockHeader,
 		AnchorTx:      *genesisTx,
@@ -294,8 +315,14 @@ func TestGenesisProofVerification(t *testing.T) {
 		},
 		ExclusionProofs:  nil,
 		AdditionalInputs: nil,
-	}
-	_, err = proof.Verify(context.Background(), nil)
+	}, genesisPrivKey
+}
+
+func TestGenesisProofVerification(t *testing.T) {
+	t.Parallel()
+
+	genesisProof, _ := genRandomGenesisWithProof(t, asset.Collectible, nil)
+	_, err := genesisProof.Verify(context.Background(), nil)
 	require.NoError(t, err)
 }
 

@@ -3,15 +3,19 @@ package proof
 import (
 	"bytes"
 	"context"
-	"io"
 	"io/ioutil"
 	"math/rand"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/lightninglabs/taro/asset"
-	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightninglabs/taro/internal/test"
 	"github.com/stretchr/testify/require"
+)
+
+var (
+	testTimeout = 5 * time.Second
 )
 
 func randAssetID(t *testing.T) *asset.ID {
@@ -20,37 +24,6 @@ func randAssetID(t *testing.T) *asset.ID {
 	require.NoError(t, err)
 
 	return &a
-}
-
-type fakeVerifier struct {
-	t   *testing.T
-	loc Locator
-}
-
-func newFakeVerifier(t *testing.T) *fakeVerifier {
-	return &fakeVerifier{
-		t: t,
-	}
-}
-
-func (f *fakeVerifier) feedLocator(loc *Locator) {
-	f.loc = *loc
-}
-
-func (f *fakeVerifier) Verify(c context.Context,
-	blobReader io.Reader) (*AssetSnapshot, error) {
-
-	return &AssetSnapshot{
-		Asset: &asset.Asset{
-
-			FamilyKey: &asset.FamilyKey{
-				FamKey: *randPubKey(f.t),
-			},
-			ScriptKey: keychain.KeyDescriptor{
-				PubKey: randPubKey(f.t),
-			},
-		},
-	}, nil
 }
 
 // TestFileArchiver tests that the file archiver functions as advertised when
@@ -69,7 +42,9 @@ func TestFileArchiver(t *testing.T) {
 	require.NoError(t, err)
 
 	// We'll use a fake verifier that just returns that the proof is valid.
-	archive := NewMultiArchiver(newFakeVerifier(t), fileArchive)
+	archive := NewMultiArchiver(
+		NewMockVerifier(t), testTimeout, fileArchive,
+	)
 
 	ctx := context.Background()
 
@@ -90,7 +65,7 @@ func TestFileArchiver(t *testing.T) {
 			name: "proof not found",
 			locator: Locator{
 				AssetID:   randAssetID(t),
-				ScriptKey: *randPubKey(t),
+				ScriptKey: *test.RandPubKey(t),
 			},
 			expectedErorr: ErrProofNotFound,
 		},
@@ -100,7 +75,7 @@ func TestFileArchiver(t *testing.T) {
 		{
 			name: "invalid asset ID",
 			locator: Locator{
-				ScriptKey: *randPubKey(t),
+				ScriptKey: *test.RandPubKey(t),
 			},
 			expectedErorr: ErrInvalidLocatorID,
 		},
@@ -121,7 +96,7 @@ func TestFileArchiver(t *testing.T) {
 			name: "proof happy path",
 			locator: Locator{
 				AssetID:   randAssetID(t),
-				ScriptKey: *randPubKey(t),
+				ScriptKey: *test.RandPubKey(t),
 			},
 			proofBlob: func() Blob {
 				return bytes.Repeat([]byte{0x01}, 100)

@@ -3,6 +3,7 @@ package taro
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,12 +12,14 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/davecgh/go-spew/spew"
 	proxy "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/lightninglabs/taro/address"
 	"github.com/lightninglabs/taro/asset"
 	"github.com/lightninglabs/taro/proof"
 	"github.com/lightninglabs/taro/rpcperms"
+	"github.com/lightninglabs/taro/tarofreighter"
 	"github.com/lightninglabs/taro/tarogarden"
 	"github.com/lightninglabs/taro/tarorpc"
 	"github.com/lightningnetwork/lnd/build"
@@ -53,15 +56,27 @@ var (
 			Entity: "assets",
 			Action: "read",
 		}},
-		"/tarorpc.Taro/QueryTaroAddrs": {{
+		"/tarorpc.Taro/ListBalances": {{
+			Entity: "assets",
+			Action: "read",
+		}},
+		"/tarorpc.Taro/ListTransfers": {{
+			Entity: "assets",
+			Action: "read",
+		}},
+		"/tarorpc.Taro/QueryAddrs": {{
 			Entity: "addresses",
 			Action: "read",
 		}},
-		"/tarorpc.Taro/NewTaroAddr": {{
+		"/tarorpc.Taro/NewAddr": {{
 			Entity: "addresses",
 			Action: "write",
 		}},
-		"/tarorpc.Taro/DecodeTaroAddr": {{
+		"/tarorpc.Taro/DecodeAddr": {{
+			Entity: "addresses",
+			Action: "read",
+		}},
+		"/tarorpc.Taro/AddrReceives": {{
 			Entity: "addresses",
 			Action: "read",
 		}},
@@ -75,6 +90,10 @@ var (
 		}},
 		"/tarorpc.Taro/ImportProof": {{
 			Entity: "proofs",
+			Action: "write",
+		}},
+		"/tarorpc.Taro/SendAsset": {{
+			Entity: "assets",
 			Action: "write",
 		}},
 	}
@@ -262,8 +281,8 @@ func (r *rpcServer) DebugLevel(ctx context.Context,
 	return &tarorpc.DebugLevelResponse{}, nil
 }
 
-// MintAsset will attempts to mint the set of assets (async by default to
-// ensure proper batching) specified in the request.
+// MintAsset attempts to mint the set of assets (async by default to ensure
+// proper batching) specified in the request.
 func (r *rpcServer) MintAsset(ctx context.Context,
 	req *tarorpc.MintAssetRequest) (*tarorpc.MintAssetResponse, error) {
 
@@ -302,51 +321,61 @@ func (r *rpcServer) MintAsset(ctx context.Context,
 func (r *rpcServer) ListAssets(ctx context.Context,
 	req *tarorpc.ListAssetRequest) (*tarorpc.ListAssetResponse, error) {
 
-	assets, err := r.cfg.AssetStore.FetchAllAssets(ctx)
+	assets, err := r.cfg.AssetStore.FetchAllAssets(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read chain assets: %w", err)
 	}
 
 	rpcAssets := make([]*tarorpc.Asset, len(assets))
-	for i, asset := range assets {
-		assetID := asset.Genesis.ID()
+	for i, a := range assets {
+		assetID := a.Genesis.ID()
+
+		var bootstrapInfoBuf bytes.Buffer
+		if err := a.Genesis.Encode(&bootstrapInfoBuf); err != nil {
+			return nil, fmt.Errorf("unable to encode genesis: %w",
+				err)
+		}
 
 		var anchorTxBytes []byte
-		if asset.AnchorTx != nil {
+		if a.AnchorTx != nil {
 			var anchorTxBuf bytes.Buffer
-			err := asset.AnchorTx.Serialize(&anchorTxBuf)
+			err := a.AnchorTx.Serialize(&anchorTxBuf)
 			if err != nil {
 				return nil, fmt.Errorf("unable to serialize "+
-					"anchor tx: %v", err)
+					"anchor tx: %w", err)
 			}
 			anchorTxBytes = anchorTxBuf.Bytes()
 		}
 		rpcAssets[i] = &tarorpc.Asset{
+			Version: int32(a.Version),
 			AssetGenesis: &tarorpc.GenesisInfo{
-				GenesisPoint: asset.Genesis.FirstPrevOut.String(),
-				Name:         asset.Genesis.Tag,
-				Meta:         asset.Genesis.Metadata,
-				AssetId:      assetID[:],
+				GenesisPoint:         a.Genesis.FirstPrevOut.String(),
+				Name:                 a.Genesis.Tag,
+				Meta:                 a.Genesis.Metadata,
+				AssetId:              assetID[:],
+				OutputIndex:          a.Genesis.OutputIndex,
+				GenesisBootstrapInfo: bootstrapInfoBuf.Bytes(),
 			},
-			AssetType:        tarorpc.AssetType(asset.Type),
-			Amount:           int64(asset.Amount),
-			LockTime:         int32(asset.LockTime),
-			RelativeLockTime: int32(asset.RelativeLockTime),
-			ScriptVersion:    int32(asset.ScriptVersion),
-			ScriptKey:        asset.ScriptKey.PubKey.SerializeCompressed(),
+			AssetType:        tarorpc.AssetType(a.Type),
+			Amount:           int64(a.Amount),
+			LockTime:         int32(a.LockTime),
+			RelativeLockTime: int32(a.RelativeLockTime),
+			ScriptVersion:    int32(a.ScriptVersion),
+			ScriptKey:        a.ScriptKey.PubKey.SerializeCompressed(),
 			ChainAnchor: &tarorpc.AnchorInfo{
 				AnchorTx:        anchorTxBytes,
-				AnchorTxid:      asset.AnchorTxid[:],
-				AnchorBlockHash: asset.AnchorBlockHash[:],
-				AnchorOutpoint:  asset.AnchorOutpoint.String(),
+				AnchorTxid:      a.AnchorTxid[:],
+				AnchorBlockHash: a.AnchorBlockHash[:],
+				AnchorOutpoint:  a.AnchorOutpoint.String(),
+				InternalKey:     a.AnchorInternalKey.SerializeCompressed(),
 			},
 		}
 
-		if asset.FamilyKey != nil {
+		if a.FamilyKey != nil {
 			rpcAssets[i].AssetFamily = &tarorpc.AssetFamily{
-				RawFamilyKey:     asset.FamilyKey.RawKey.PubKey.SerializeCompressed(),
-				TweakedFamilyKey: asset.FamilyKey.FamKey.SerializeCompressed(),
-				AssetIdSig:       asset.FamilyKey.Sig.Serialize(),
+				RawFamilyKey:     a.FamilyKey.RawKey.PubKey.SerializeCompressed(),
+				TweakedFamilyKey: a.FamilyKey.FamKey.SerializeCompressed(),
+				AssetIdSig:       a.FamilyKey.Sig.Serialize(),
 			}
 		}
 	}
@@ -356,15 +385,199 @@ func (r *rpcServer) ListAssets(ctx context.Context,
 	}, nil
 }
 
+func (r *rpcServer) listBalancesByAsset(ctx context.Context,
+	assetID *asset.ID) (*tarorpc.ListBalancesResponse, error) {
+
+	balances, err := r.cfg.AssetStore.QueryBalancesByAsset(ctx, assetID)
+	if err != nil {
+		return nil, fmt.Errorf("unable to list balances: %w", err)
+	}
+
+	resp := &tarorpc.ListBalancesResponse{
+		AssetBalances: make(map[string]*tarorpc.AssetBalance, len(balances)),
+	}
+
+	for _, balance := range balances {
+		assetIDStr := hex.EncodeToString(balance.ID[:])
+
+		gen := asset.Genesis{
+			FirstPrevOut: balance.GenesisPoint,
+			Tag:          balance.Tag,
+			Metadata:     balance.Meta,
+			OutputIndex:  balance.OutputIndex,
+			Type:         balance.Type,
+		}
+		var bootstrapInfoBuf bytes.Buffer
+		if err := gen.Encode(&bootstrapInfoBuf); err != nil {
+			return nil, fmt.Errorf("unable to encode genesis: %w",
+				err)
+		}
+
+		resp.AssetBalances[assetIDStr] = &tarorpc.AssetBalance{
+			AssetGenesis: &tarorpc.GenesisInfo{
+				Version:              int32(balance.Version),
+				GenesisPoint:         balance.GenesisPoint.String(),
+				Name:                 balance.Tag,
+				Meta:                 balance.Meta,
+				AssetId:              balance.ID[:],
+				GenesisBootstrapInfo: bootstrapInfoBuf.Bytes(),
+			},
+			AssetType: tarorpc.AssetType(balance.Type),
+			Balance:   int64(balance.Balance),
+		}
+	}
+
+	return resp, nil
+}
+
+func (r *rpcServer) listBalancesByFamilyKey(ctx context.Context,
+	famKey *btcec.PublicKey) (*tarorpc.ListBalancesResponse, error) {
+
+	balances, err := r.cfg.AssetStore.QueryAssetBalancesByFamily(
+		ctx, famKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to list balances: %w", err)
+	}
+
+	resp := &tarorpc.ListBalancesResponse{
+		AssetFamilyBalances: make(
+			map[string]*tarorpc.AssetFamilyBalance, len(balances),
+		),
+	}
+
+	for _, balance := range balances {
+		var famKey []byte
+		if balance.FamKey != nil {
+			famKey = balance.FamKey.SerializeCompressed()
+		}
+
+		famKeyString := hex.EncodeToString(famKey)
+		resp.AssetFamilyBalances[famKeyString] = &tarorpc.AssetFamilyBalance{
+			FamilyKey: famKey,
+			Balance:   int64(balance.Balance),
+		}
+	}
+
+	return resp, nil
+}
+
+// ListBalances lists the asset balances owned by the daemon.
+func (r *rpcServer) ListBalances(ctx context.Context,
+	in *tarorpc.ListBalancesRequest) (*tarorpc.ListBalancesResponse, error) {
+
+	switch groupBy := in.GroupBy.(type) {
+	case *tarorpc.ListBalancesRequest_AssetId:
+		if !groupBy.AssetId {
+			return nil, fmt.Errorf("invalid group_by")
+		}
+
+		var assetID *asset.ID
+		if len(in.AssetFilter) != 0 {
+			assetID = &asset.ID{}
+			if len(in.AssetFilter) != len(assetID) {
+				return nil, fmt.Errorf("invalid asset filter")
+			}
+
+			copy(assetID[:], in.AssetFilter)
+		}
+
+		return r.listBalancesByAsset(ctx, assetID)
+
+	case *tarorpc.ListBalancesRequest_FamKey:
+		if !groupBy.FamKey {
+			return nil, fmt.Errorf("invalid group_by")
+		}
+
+		var famKey *btcec.PublicKey
+		if len(in.FamilyKeyFilter) != 0 {
+			var err error
+			famKey, err = btcec.ParsePubKey(in.FamilyKeyFilter)
+			if err != nil {
+				return nil, fmt.Errorf("invalid family key "+
+					"filter: %v", err)
+			}
+		}
+
+		return r.listBalancesByFamilyKey(ctx, famKey)
+
+	default:
+		return nil, fmt.Errorf("invalid group_by")
+	}
+}
+
+// ListTransfers lists all asset transfers managed by this deamon.
+func (r *rpcServer) ListTransfers(ctx context.Context,
+	in *tarorpc.ListTransfersRequest) (*tarorpc.ListTransfersResponse,
+	error) {
+
+	parcels, err := r.cfg.AssetStore.QueryParcels(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query parcels: %w", err)
+	}
+
+	resp := &tarorpc.ListTransfersResponse{
+		Transfers: make([]*tarorpc.AssetTransfer, 0, len(parcels)),
+	}
+
+	for _, parcel := range parcels {
+		deltas := make(
+			[]*tarorpc.AssetSpendDelta,
+			len(parcel.AssetSpendDeltas),
+		)
+
+		for i, delta := range parcel.AssetSpendDeltas {
+			senderProof := &proof.Proof{}
+			err := senderProof.Decode(
+				bytes.NewReader(delta.SenderAssetProof),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("unable to decode "+
+					"sender proof: %w", err)
+			}
+
+			assetID := senderProof.Asset.ID()
+			deltas[i] = &tarorpc.AssetSpendDelta{
+				AssetId:      assetID[:],
+				OldScriptKey: delta.OldScriptKey.SerializeCompressed(),
+				NewScriptKey: delta.NewScriptKey.PubKey.SerializeCompressed(),
+				NewAmt:       int64(delta.NewAmt),
+			}
+		}
+
+		anchorTxHash := parcel.AnchorTx.TxHash()
+		resp.Transfers = append(
+			resp.Transfers, &tarorpc.AssetTransfer{
+				TransferTimestamp: parcel.TransferTime.Unix(),
+				OldAnchorPoint:    parcel.OldAnchorPoint.String(),
+				NewAnchorPoint:    parcel.NewAnchorPoint.String(),
+				TaroRoot:          parcel.TaroRoot,
+				AnchorTxHash:      anchorTxHash[:],
+				AssetSpendDeltas:  deltas,
+			},
+		)
+	}
+
+	return resp, nil
+}
+
 // QueryAddrs queries the set of Taro addresses stored in the database.
 func (r *rpcServer) QueryAddrs(ctx context.Context,
 	in *tarorpc.QueryAddrRequest) (*tarorpc.QueryAddrResponse, error) {
 
 	query := address.QueryParams{
-		CreatedAfter:  time.Unix(in.CreatedAfter, 0),
-		CreatedBefore: time.Unix(in.CreatedBefore, 0),
-		Limit:         in.Limit,
-		Offset:        in.Offset,
+		Limit:  in.Limit,
+		Offset: in.Offset,
+	}
+
+	// The unix time of 0 (1970-01-01) is not the same as an empty Time
+	// struct (0000-00-00). For our query to succeed, we need to set the
+	// time values the way the address book expects them.
+	if in.CreatedBefore > 0 {
+		query.CreatedBefore = time.Unix(in.CreatedBefore, 0)
+	}
+	if in.CreatedAfter > 0 {
+		query.CreatedAfter = time.Unix(in.CreatedAfter, 0)
 	}
 
 	rpcsLog.Debugf("[QueryAddrs]: addr query params: %v",
@@ -381,14 +594,10 @@ func (r *rpcServer) QueryAddrs(ctx context.Context,
 	addrs := make([]*tarorpc.Addr, len(dbAddrs))
 	for i, dbAddr := range dbAddrs {
 		dbAddr.ChainParams = &taroParams
-
-		addrStr, err := dbAddr.EncodeAddress()
+		addrs[i], err = marshalAddr(dbAddr.Taro)
 		if err != nil {
-			return nil, fmt.Errorf("unable to encode addr: %w", err)
-		}
-
-		addrs[i] = &tarorpc.Addr{
-			Addr: addrStr,
+			return nil, fmt.Errorf("unable to marshal addr: %w",
+				err)
 		}
 	}
 
@@ -418,36 +627,40 @@ func (r *rpcServer) NewAddr(ctx context.Context,
 		}
 	}
 
-	var assetID asset.ID
-	copy(assetID[:], in.AssetId)
+	genReader := bytes.NewReader(in.GenesisBootstrapInfo)
+	genesis, err := asset.DecodeGenesis(genReader)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode genesis bootstrap "+
+			"info: %w", err)
+	}
 
-	rpcsLog.Infof("[NewTaroAddr]: making new addr: asset_id=%x, amt=%v, type=%v",
-		assetID, in.Amt, asset.Type(in.AssetType))
+	assetID := genesis.ID()
+	rpcsLog.Infof("[NewAddr]: making new addr: asset_id=%x, amt=%v, "+
+		"type=%v", assetID[:], in.Amt, asset.Type(genesis.Type))
 
 	// Now that we have all the params, we'll try to add a new address to
 	// the addr book.
 	addr, err := r.cfg.AddrBook.NewAddress(
-		ctx, assetID, famKey, uint64(in.Amt), asset.Type(in.AssetType),
+		ctx, genesis, famKey, uint64(in.Amt),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to make new addr: %w", err)
 	}
 
-	// With our addr obtained, we'll encode it as a string then send off
-	// the response.
-	addrStr, err := addr.EncodeAddress()
+	// With our addr obtained, we'll marshal it as an RPC message then send
+	// off the response.
+	rpcAddr, err := marshalAddr(addr.Taro)
 	if err != nil {
-		return nil, fmt.Errorf("unable to encode addr: %w", err)
+		return nil, fmt.Errorf("unable to marshal addr: %w", err)
 	}
-	return &tarorpc.Addr{
-		Addr: addrStr,
-	}, nil
+
+	return rpcAddr, nil
 }
 
 // DecodeAddr decode a Taro address into a partial asset message that
 // represents the asset it wants to receive.
-func (r *rpcServer) DecodeAddr(ctx context.Context,
-	in *tarorpc.Addr) (*tarorpc.Asset, error) {
+func (r *rpcServer) DecodeAddr(_ context.Context,
+	in *tarorpc.DecodeAddrRequest) (*tarorpc.Addr, error) {
 
 	if len(in.Addr) == 0 {
 		return nil, fmt.Errorf("must specify an addr")
@@ -460,23 +673,12 @@ func (r *rpcServer) DecodeAddr(ctx context.Context,
 		return nil, fmt.Errorf("unable to decode addr: %w", err)
 	}
 
-	var famKeyBytes []byte
-	if addr.FamilyKey != nil {
-		famKeyBytes = addr.FamilyKey.SerializeCompressed()
+	rpcAddr, err := marshalAddr(addr)
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal addr: %w", err)
 	}
 
-	// TODO(roasbeef): display internal key somewhere?
-	return &tarorpc.Asset{
-		AssetGenesis: &tarorpc.GenesisInfo{
-			AssetId: addr.ID[:],
-		},
-		AssetFamily: &tarorpc.AssetFamily{
-			TweakedFamilyKey: famKeyBytes,
-		},
-		ScriptKey: addr.ScriptKey.SerializeCompressed(),
-		Amount:    int64(addr.Amount),
-		AssetType: tarorpc.AssetType(addr.Type),
-	}, nil
+	return rpcAddr, nil
 }
 
 // VerifyProof attempts to verify a given proof file that claims to be anchored
@@ -561,4 +763,233 @@ func (r *rpcServer) ImportProof(ctx context.Context,
 	}
 
 	return &tarorpc.ImportProofResponse{}, nil
+}
+
+// AddrReceives lists all receives for incoming asset transfers for addresses
+// that were created previously.
+func (r *rpcServer) AddrReceives(ctx context.Context,
+	in *tarorpc.AddrReceivesRequest) (*tarorpc.AddrReceivesResponse,
+	error) {
+
+	var sqlQuery address.EventQueryParams
+
+	if len(in.FilterAddr) > 0 {
+		taroParams := address.ParamsForChain(r.cfg.ChainParams.Name)
+
+		addr, err := address.DecodeAddress(in.FilterAddr, &taroParams)
+		if err != nil {
+			return nil, fmt.Errorf("unable to decode addr: %w", err)
+		}
+
+		taprootOutputKey, err := addr.TaprootOutputKey(nil)
+		if err != nil {
+			return nil, fmt.Errorf("error deriving Taproot key: %w",
+				err)
+		}
+
+		sqlQuery.AddrTaprootOutputKey = schnorr.SerializePubKey(
+			taprootOutputKey,
+		)
+	}
+
+	if in.FilterStatus != tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_UNKNOWN {
+		status, err := unmarshalAddrEventStatus(in.FilterStatus)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing status: %w", err)
+		}
+
+		sqlQuery.StatusFrom = &status
+		sqlQuery.StatusTo = &status
+	}
+
+	events, err := r.cfg.AddrBook.QueryEvents(ctx, sqlQuery)
+	if err != nil {
+		return nil, fmt.Errorf("error querying events: %w", err)
+	}
+
+	resp := &tarorpc.AddrReceivesResponse{
+		Events: make([]*tarorpc.AddrEvent, len(events)),
+	}
+
+	for idx, event := range events {
+		resp.Events[idx], err = marshalAddrEvent(event)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling event: %w",
+				err)
+		}
+	}
+
+	return resp, nil
+}
+
+// marshalAddr turns an address into its RPC counterpart.
+func marshalAddr(addr *address.Taro) (*tarorpc.Addr, error) {
+	addrStr, err := addr.EncodeAddress()
+	if err != nil {
+		return nil, fmt.Errorf("unable to encode addr: %w", err)
+	}
+
+	taprootOutputKey, err := addr.TaprootOutputKey(nil)
+	if err != nil {
+		return nil, fmt.Errorf("error deriving Taproot output key: %w",
+			err)
+	}
+
+	id := addr.ID()
+	rpcAddr := &tarorpc.Addr{
+		Encoded:          addrStr,
+		AssetId:          id[:],
+		AssetType:        tarorpc.AssetType(addr.Type),
+		Amount:           int64(addr.Amount),
+		ScriptKey:        addr.ScriptKey.SerializeCompressed(),
+		InternalKey:      addr.InternalKey.SerializeCompressed(),
+		TaprootOutputKey: schnorr.SerializePubKey(taprootOutputKey),
+	}
+
+	if addr.FamilyKey != nil {
+		rpcAddr.FamilyKey = addr.FamilyKey.SerializeCompressed()
+	}
+
+	return rpcAddr, nil
+}
+
+// marshalAddrEvent turns an address event into its RPC counterpart.
+func marshalAddrEvent(event *address.Event) (*tarorpc.AddrEvent, error) {
+	rpcAddr, err := marshalAddr(event.Addr.Taro)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling addr: %w", err)
+	}
+
+	rpcStatus, err := marshalAddrEventStatus(event.Status)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling status: %w", err)
+	}
+
+	return &tarorpc.AddrEvent{
+		CreationTimeUnixSeconds: uint64(event.CreationTime.Unix()),
+		Addr:                    rpcAddr,
+		Status:                  rpcStatus,
+		Outpoint:                event.Outpoint.String(),
+		UtxoAmtSat:              uint64(event.Amt),
+		TaprootSibling:          event.TapscriptSibling,
+		ConfirmationHeight:      event.ConfirmationHeight,
+		HasProof:                event.HasProof,
+	}, nil
+}
+
+// unmarshalAddrEventStatus parses the RPC address event status into the native
+// counterpart.
+func unmarshalAddrEventStatus(
+	rpcStatus tarorpc.AddrEventStatus) (address.Status, error) {
+
+	switch rpcStatus {
+	case tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_TRANSACTION_DETECTED:
+		return address.StatusTransactionDetected, nil
+
+	case tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_TRANSACTION_CONFIRMED:
+		return address.StatusTransactionConfirmed, nil
+
+	case tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_PROOF_RECEIVED:
+		return address.StatusProofReceived, nil
+
+	case tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_COMPLETED:
+		return address.StatusCompleted, nil
+
+	default:
+		return 0, fmt.Errorf("unknown address event status <%d>",
+			rpcStatus)
+	}
+}
+
+// marshalAddrEventStatus turns the address event status into the RPC
+// counterpart.
+func marshalAddrEventStatus(status address.Status) (tarorpc.AddrEventStatus,
+	error) {
+
+	switch status {
+	case address.StatusTransactionDetected:
+		return tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_TRANSACTION_DETECTED,
+			nil
+
+	case address.StatusTransactionConfirmed:
+		return tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_TRANSACTION_CONFIRMED,
+			nil
+
+	case address.StatusProofReceived:
+		return tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_PROOF_RECEIVED,
+			nil
+
+	case address.StatusCompleted:
+		return tarorpc.AddrEventStatus_ADDR_EVENT_STATUS_COMPLETED, nil
+
+	default:
+		return 0, fmt.Errorf("unknown address event status <%d>",
+			status)
+	}
+}
+
+// SendAsset uses a passed taro address to attempt to complete an asset send.
+// The method returns information w.r.t the on chain send, as well as the proof
+// file information the receiver needs to fully receive the asset.
+func (r *rpcServer) SendAsset(ctx context.Context,
+	in *tarorpc.SendAssetRequest) (*tarorpc.SendAssetResponse, error) {
+
+	if in.TaroAddr == "" {
+		return nil, fmt.Errorf("addr must be set")
+	}
+
+	taroParams := address.ParamsForChain(r.cfg.ChainParams.Name)
+	taroAddr, err := address.DecodeAddress(in.TaroAddr, &taroParams)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := r.cfg.ChainPorter.RequestShipment(&tarofreighter.AssetParcel{
+		Dest: taroAddr,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	transferTXID := resp.TransferTx.TxHash()
+
+	var txBuf bytes.Buffer
+	if err := resp.TransferTx.Serialize(&txBuf); err != nil {
+		return nil, err
+	}
+	transferTxBytes := txBuf.Bytes()
+
+	prevInputs := make([]*tarorpc.PrevInputAsset, len(resp.AssetInputs))
+	newOutputs := make([]*tarorpc.AssetOutput, len(resp.AssetOutputs))
+
+	for i, input := range resp.AssetInputs {
+		prevInputs[i] = &tarorpc.PrevInputAsset{
+			AnchorPoint: input.PrevID.OutPoint.String(),
+			AssetId:     input.PrevID.ID[:],
+			ScriptKey:   input.PrevID.ScriptKey[:],
+			Amount:      int64(input.Amount),
+		}
+	}
+	for i, output := range resp.AssetOutputs {
+		newOutputs[i] = &tarorpc.AssetOutput{
+			AnchorPoint: output.PrevID.OutPoint.String(),
+			AssetId:     output.PrevID.ID[:],
+			ScriptKey:   output.PrevID.ScriptKey[:],
+			Amount:      int64(output.Amount),
+			// TODO(roasbeef): add blob and split proof
+		}
+	}
+
+	return &tarorpc.SendAssetResponse{
+		TransferTxid:      transferTXID[:],
+		AnchorOutputIndex: int32(resp.NewAnchorPoint.Index),
+		TransferTxBytes:   transferTxBytes,
+		TaroTransfer: &tarorpc.TaroTransfer{
+			OldTaroRoot: resp.OldTaroRoot,
+			NewTaroRoot: resp.NewTaroRoot,
+			PrevInputs:  prevInputs,
+			NewOutputs:  newOutputs,
+		},
+		TotalFeeSats: 0,
+	}, nil
 }

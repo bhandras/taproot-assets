@@ -28,41 +28,6 @@ var (
 	sig, _ = schnorr.ParseSignature(sigBytes)
 )
 
-func assertAssetEqual(t *testing.T, a, b *Asset) {
-	t.Helper()
-
-	require.Equal(t, a.Version, b.Version)
-	require.Equal(t, a.Genesis, b.Genesis)
-	require.Equal(t, a.Type, b.Type)
-	require.Equal(t, a.Amount, b.Amount)
-	require.Equal(t, a.LockTime, b.LockTime)
-	require.Equal(t, a.RelativeLockTime, b.RelativeLockTime)
-	require.Equal(t, len(a.PrevWitnesses), len(b.PrevWitnesses))
-	for i := range a.PrevWitnesses {
-		witA, witB := a.PrevWitnesses[i], b.PrevWitnesses[i]
-		require.Equal(t, witA.PrevID, witB.PrevID)
-		require.Equal(t, witA.TxWitness, witB.TxWitness)
-		splitA, splitB := witA.SplitCommitment, witB.SplitCommitment
-		if witA.SplitCommitment != nil && witB.SplitCommitment != nil {
-			require.Equal(
-				t, len(splitA.Proof.Nodes), len(splitB.Proof.Nodes),
-			)
-			for i := range splitA.Proof.Nodes {
-				nodeA := splitA.Proof.Nodes[i]
-				nodeB := splitB.Proof.Nodes[i]
-				require.True(t, mssmt.IsEqualNode(nodeA, nodeB))
-			}
-			require.Equal(t, splitA.RootAsset, splitB.RootAsset)
-		} else {
-			require.Equal(t, splitA, splitB)
-		}
-	}
-	require.Equal(t, a.SplitCommitmentRoot, b.SplitCommitmentRoot)
-	require.Equal(t, a.ScriptVersion, b.ScriptVersion)
-	require.Equal(t, a.ScriptKey, b.ScriptKey)
-	require.Equal(t, a.FamilyKey, b.FamilyKey)
-}
-
 // TestFamilyKeyIsEqual tests that FamilyKey.IsEqual is correct.
 func TestFamilyKeyIsEqual(t *testing.T) {
 	t.Parallel()
@@ -199,12 +164,15 @@ func TestAssetEncoding(t *testing.T) {
 	assertAssetEncoding := func(a *Asset) {
 		t.Helper()
 
-		assertAssetEqual(t, a, a.Copy())
+		require.True(t, a.DeepEqual(a.Copy()))
+
 		var buf bytes.Buffer
 		require.NoError(t, a.Encode(&buf))
+
 		var b Asset
 		require.NoError(t, b.Decode(&buf))
-		assertAssetEqual(t, a, &b)
+
+		require.True(t, a.DeepEqual(&b))
 	}
 
 	split := &Asset{
@@ -229,16 +197,14 @@ func TestAssetEncoding(t *testing.T) {
 					Index: 1,
 				},
 				ID:        hashBytes1,
-				ScriptKey: *pubKey,
+				ScriptKey: ToSerialized(pubKey),
 			},
 			TxWitness:       nil,
 			SplitCommitment: nil,
 		}},
 		SplitCommitmentRoot: nil,
 		ScriptVersion:       1,
-		ScriptKey: keychain.KeyDescriptor{
-			PubKey: pubKey,
-		},
+		ScriptKey:           NewScriptKey(pubKey),
 		FamilyKey: &FamilyKey{
 			FamKey: *pubKey,
 			Sig:    *sig,
@@ -257,16 +223,14 @@ func TestAssetEncoding(t *testing.T) {
 					Index: 2,
 				},
 				ID:        hashBytes2,
-				ScriptKey: *pubKey,
+				ScriptKey: ToSerialized(pubKey),
 			},
 			TxWitness:       wire.TxWitness{{2}, {2}},
 			SplitCommitment: nil,
 		}},
 		SplitCommitmentRoot: mssmt.NewComputedNode(hashBytes1, 1337),
 		ScriptVersion:       1,
-		ScriptKey: keychain.KeyDescriptor{
-			PubKey: pubKey,
-		},
+		ScriptKey:           NewScriptKey(pubKey),
 		FamilyKey: &FamilyKey{
 			FamKey: *pubKey,
 			Sig:    *sig,
@@ -308,17 +272,15 @@ func TestAssetEncoding(t *testing.T) {
 					Index: 2,
 				},
 				ID:        hashBytes2,
-				ScriptKey: *pubKey,
+				ScriptKey: ToSerialized(pubKey),
 			},
 			TxWitness:       wire.TxWitness{{2}, {2}},
 			SplitCommitment: nil,
 		}},
 		SplitCommitmentRoot: nil,
 		ScriptVersion:       2,
-		ScriptKey: keychain.KeyDescriptor{
-			PubKey: pubKey,
-		},
-		FamilyKey: nil,
+		ScriptKey:           NewScriptKey(pubKey),
+		FamilyKey:           nil,
 	})
 }
 
@@ -347,19 +309,17 @@ func TestAssetType(t *testing.T) {
 		OutputIndex: 2,
 		Type:        Collectible,
 	}
-	desc := keychain.KeyDescriptor{
-		PubKey: pubKey,
-	}
+	scriptKey := NewScriptKey(pubKey)
 
-	normal, err := New(normalGen, 741, 0, 0, desc, nil)
+	normal, err := New(normalGen, 741, 0, 0, scriptKey, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 741, normal.Amount)
 
-	_, err = New(collectibleGen, 741, 0, 0, desc, nil)
+	_, err = New(collectibleGen, 741, 0, 0, scriptKey, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "amount must be 1 for asset")
 
-	collectible, err := New(collectibleGen, 1, 0, 0, desc, nil)
+	collectible, err := New(collectibleGen, 1, 0, 0, scriptKey, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, collectible.Amount)
 }

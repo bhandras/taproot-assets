@@ -37,10 +37,10 @@ DEV_TAGS := $(if ${tags},$(DEV_TAGS) ${tags},$(DEV_TAGS))
 # We only return the part inside the double quote here to avoid escape issues
 # when calling the external release script. The second parameter can be used to
 # add additional ldflags if needed (currently only used for the release).
-make_ldflags = $(2) -X $(PKG)/build.Commit=$(COMMIT) \
-	-X $(PKG)/build.CommitHash=$(COMMIT_HASH) \
-	-X $(PKG)/build.GoVersion=$(GOVERSION) \
-	-X $(PKG)/build.RawTags=$(shell echo $(1) | sed -e 's/ /,/g')
+make_ldflags = $(2) -X $(PKG).Commit=$(COMMIT) \
+	-X $(PKG).CommitHash=$(COMMIT_HASH) \
+	-X $(PKG).GoVersion=$(GOVERSION) \
+	-X $(PKG).RawTags=$(shell echo $(1) | sed -e 's/ /,/g')
 
 make_lnd_ldflags = -X $(LND_PKG)/build.RawTags=$(shell echo $(1) | sed -e 's/ /,/g')
 DEV_GCFLAGS := -gcflags "all=-N -l"
@@ -147,6 +147,22 @@ itest-only:
 	rm -rf itest/regtest; date
 	$(GOTEST) ./itest -v -tags="$(ITEST_TAGS)" $(TEST_FLAGS) $(ITEST_FLAGS) -btcdexec=./btcd-itest -logdir=regtest
 
+# =============
+# FLAKE HUNTING
+# =============
+
+flakehunter: build-itest
+	@$(call print, "Flake hunting ${backend} integration tests.")
+	while [ $$? -eq 0 ]; do make itest-only; done
+
+flake-unit:
+	@$(call print, "Flake hunting unit tests.")
+	while [ $$? -eq 0 ]; do '$(GOLIST) | $(XARGS) env $(GOTEST) -test.timeout=20m -count=1'; done
+
+flake-unit-race:
+	@$(call print, "Flake hunting races in unit tests.")
+	while [ $$? -eq 0 ]; do env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(GOLIST) | $(XARGS) env $(GOTEST) -race -test.timeout=20m -count=1; done
+
 # =========
 # UTILITIES
 # =========
@@ -172,7 +188,7 @@ rpc-format:
 rpc-check: rpc
 	@$(call print, "Verifying protos.")
 	cd ./tarorpc; ../scripts/check-rest-annotations.sh
-	if test -n "$$(git status --porcelain)"; then echo "Protos not properly formatted or not compiled with v3.4.0"; git status; git diff; exit 1; fi
+	if test -n "$$(git status --porcelain)"; then echo "Protos not properly formatted or not compiled with correct version"; git status; git diff; exit 1; fi
 
 vendor:
 	@$(call print, "Re-creating vendor directory.")

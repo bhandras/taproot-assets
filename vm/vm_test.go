@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taro/asset"
 	"github.com/lightninglabs/taro/commitment"
+	"github.com/lightninglabs/taro/taroscript"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/stretchr/testify/require"
 )
@@ -72,10 +73,30 @@ func randAsset(t *testing.T, assetType asset.Type,
 	}
 
 	a, err := asset.New(
-		genesis, units, 0, 0, toKeyDesc(&scriptKey), familyKey,
+		genesis, units, 0, 0, asset.NewScriptKey(&scriptKey), familyKey,
 	)
 	require.NoError(t, err)
 	return a
+}
+
+func genTaprootKeySpend(t *testing.T, privKey btcec.PrivateKey,
+	virtualTx *wire.MsgTx, input *asset.Asset, idx uint32) wire.TxWitness {
+
+	t.Helper()
+
+	virtualTxCopy := taroscript.VirtualTxWithInput(
+		virtualTx, input, idx, nil,
+	)
+	sigHash, err := taroscript.InputKeySpendSigHash(
+		virtualTxCopy, input, idx,
+	)
+	require.NoError(t, err)
+
+	taprootPrivKey := txscript.TweakTaprootPrivKey(&privKey, nil)
+	sig, err := schnorr.Sign(taprootPrivKey, sigHash)
+	require.NoError(t, err)
+
+	return wire.TxWitness{sig.Serialize()}
 }
 
 func genTaprootScriptSpend(t *testing.T, privKey btcec.PrivateKey,
@@ -91,8 +112,8 @@ func genTaprootScriptSpend(t *testing.T, privKey btcec.PrivateKey,
 	controlBlockBytes, err := controlBlock.ToBytes()
 	require.NoError(t, err)
 
-	virtualTxCopy := virtualTxWithInput(virtualTx, input, idx, nil)
-	sigHash, err := InputScriptSpendSigHash(
+	virtualTxCopy := taroscript.VirtualTxWithInput(virtualTx, input, idx, nil)
+	sigHash, err := taroscript.InputScriptSpendSigHash(
 		virtualTxCopy, input, idx, tapLeaf,
 	)
 	require.NoError(t, err)
@@ -142,10 +163,10 @@ func collectibleStateTransition(t *testing.T) (*asset.Asset,
 	prevID := &asset.PrevID{
 		OutPoint:  genesisOutPoint,
 		ID:        genesisAsset.Genesis.ID(),
-		ScriptKey: *genesisAsset.ScriptKey.PubKey,
+		ScriptKey: asset.ToSerialized(genesisAsset.ScriptKey.PubKey),
 	}
 	newAsset := genesisAsset.Copy()
-	newAsset.ScriptKey = toKeyDesc(randKey(t).PubKey())
+	newAsset.ScriptKey = asset.NewScriptKey(randKey(t).PubKey())
 	newAsset.PrevWitnesses = []asset.Witness{{
 		PrevID:          prevID,
 		TxWitness:       nil,
@@ -153,11 +174,13 @@ func collectibleStateTransition(t *testing.T) (*asset.Asset,
 	}}
 
 	inputs := commitment.InputSet{*prevID: genesisAsset}
-	virtualTx, _, err := VirtualTx(newAsset, inputs)
+	virtualTx, _, err := taroscript.VirtualTx(newAsset, inputs)
 	require.NoError(t, err)
-	newWitness, err := SignTaprootKeySpend(*privKey, virtualTx, genesisAsset, 0)
+	newWitness := genTaprootKeySpend(
+		t, *privKey, virtualTx, genesisAsset, 0,
+	)
 	require.NoError(t, err)
-	newAsset.PrevWitnesses[0].TxWitness = *newWitness
+	newAsset.PrevWitnesses[0].TxWitness = newWitness
 
 	return newAsset, nil, inputs
 }
@@ -193,17 +216,17 @@ func normalStateTransition(t *testing.T) (*asset.Asset, commitment.SplitSet,
 	prevID1 := &asset.PrevID{
 		OutPoint:  genesisOutPoint,
 		ID:        genesisAsset1.Genesis.ID(),
-		ScriptKey: *genesisAsset1.ScriptKey.PubKey,
+		ScriptKey: asset.ToSerialized(genesisAsset1.ScriptKey.PubKey),
 	}
 	prevID2 := &asset.PrevID{
 		OutPoint:  genesisOutPoint,
 		ID:        genesisAsset2.Genesis.ID(),
-		ScriptKey: *genesisAsset2.ScriptKey.PubKey,
+		ScriptKey: asset.ToSerialized(genesisAsset2.ScriptKey.PubKey),
 	}
 
 	newAsset := genesisAsset1.Copy()
 	newAsset.Amount = genesisAsset1.Amount + genesisAsset2.Amount
-	newAsset.ScriptKey = toKeyDesc(randKey(t).PubKey())
+	newAsset.ScriptKey = asset.NewScriptKey(randKey(t).PubKey())
 	newAsset.PrevWitnesses = []asset.Witness{{
 		PrevID:          prevID1,
 		TxWitness:       nil,
@@ -218,13 +241,13 @@ func normalStateTransition(t *testing.T) (*asset.Asset, commitment.SplitSet,
 		*prevID1: genesisAsset1,
 		*prevID2: genesisAsset2,
 	}
-	virtualTx, _, err := VirtualTx(newAsset, inputs)
+	virtualTx, _, err := taroscript.VirtualTx(newAsset, inputs)
 	require.NoError(t, err)
-	newWitness, err := SignTaprootKeySpend(
-		*privKey1, virtualTx, genesisAsset1, 0,
+	newWitness := genTaprootKeySpend(
+		t, *privKey1, virtualTx, genesisAsset1, 0,
 	)
 	require.NoError(t, err)
-	newAsset.PrevWitnesses[0].TxWitness = *newWitness
+	newAsset.PrevWitnesses[0].TxWitness = newWitness
 	newAsset.PrevWitnesses[1].TxWitness = genTaprootScriptSpend(
 		t, *privKey2, virtualTx, genesisAsset2, 1, tapTree, &tapLeaf,
 	)
@@ -246,19 +269,19 @@ func splitStateTransition(t *testing.T) (*asset.Asset, commitment.SplitSet,
 	rootLocator := &commitment.SplitLocator{
 		OutputIndex: 0,
 		AssetID:     assetID,
-		ScriptKey:   *genesisAsset.ScriptKey.PubKey,
+		ScriptKey:   asset.ToSerialized(genesisAsset.ScriptKey.PubKey),
 		Amount:      1,
 	}
 	externalLocators := []*commitment.SplitLocator{{
 		OutputIndex: 1,
 		AssetID:     assetID,
-		ScriptKey:   *randKey(t).PubKey(),
+		ScriptKey:   asset.ToSerialized(randKey(t).PubKey()),
 		Amount:      1,
 	}, {
 
 		OutputIndex: 2,
 		AssetID:     assetID,
-		ScriptKey:   *randKey(t).PubKey(),
+		ScriptKey:   asset.ToSerialized(randKey(t).PubKey()),
 		Amount:      1,
 	}}
 	splitCommitment, err := commitment.NewSplitCommitment(
@@ -266,13 +289,15 @@ func splitStateTransition(t *testing.T) (*asset.Asset, commitment.SplitSet,
 	)
 	require.NoError(t, err)
 
-	virtualTx, _, err := VirtualTx(
+	virtualTx, _, err := taroscript.VirtualTx(
 		splitCommitment.RootAsset, splitCommitment.PrevAssets,
 	)
 	require.NoError(t, err)
-	newWitness, err := SignTaprootKeySpend(*privKey, virtualTx, genesisAsset, 0)
+	newWitness := genTaprootKeySpend(
+		t, *privKey, virtualTx, genesisAsset, 0,
+	)
 	require.NoError(t, err)
-	splitCommitment.RootAsset.PrevWitnesses[0].TxWitness = *newWitness
+	splitCommitment.RootAsset.PrevWitnesses[0].TxWitness = newWitness
 
 	return splitCommitment.RootAsset, splitCommitment.SplitAssets,
 		splitCommitment.PrevAssets

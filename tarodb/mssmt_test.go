@@ -11,8 +11,10 @@ import (
 
 // newTaroTreeStore makes a new instance of the TaroTreeStore backed by sqlite
 // by default.
-func newTaroTreeStore(t *testing.T) (*TaroTreeStore, *SqliteStore, func()) {
-	db, cleanUp := newTestSqliteDB(t)
+func newTaroTreeStore(t *testing.T,
+	namespace string) (*TaroTreeStore, *SqliteStore) {
+
+	db := NewTestSqliteDB(t)
 
 	txCreator := func(tx Tx) TreeStore {
 		sqlTx, _ := tx.(*sql.Tx)
@@ -23,7 +25,7 @@ func newTaroTreeStore(t *testing.T) (*TaroTreeStore, *SqliteStore, func()) {
 		db, txCreator,
 	)
 
-	return NewTaroTreeStore(treeDB), db, cleanUp
+	return NewTaroTreeStore(treeDB, namespace), db
 }
 
 // assertNodesEq is a helper to check equivalency or equality based on the
@@ -72,17 +74,21 @@ func TestTreeDeletion(t *testing.T) {
 	// Prepare some leaves and compacted leaves.
 	l1 := mssmt.NewLeafNode([]byte{1, 2, 3}, 1)
 	l2 := mssmt.NewLeafNode([]byte{4, 5, 6}, 2)
+	_ = l1.NodeHash()
+	_ = l2.NodeHash()
 
 	k1 := [32]byte{1}
 	k2 := [32]byte{2}
 
 	// Note that the compacted leaf's height is not stored in the database
-	// and is only set arbitarily.
+	// and is only set arbitrarily.
 	cl1 := mssmt.NewCompactedLeafNode(100, &k1, l1)
 	cl2 := mssmt.NewCompactedLeafNode(100, &k2, l2)
 
 	b1 := mssmt.NewBranch(cl2, mssmt.EmptyTree[101])
 	b2 := mssmt.NewBranch(mssmt.EmptyTree[101], cl2)
+	_ = b1.NodeHash()
+	_ = b2.NodeHash()
 	tests := []struct {
 		name   string
 		root   int
@@ -146,10 +152,18 @@ func TestTreeDeletion(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, _, cleanUp := newTaroTreeStore(t)
-			defer cleanUp()
+			store, _ := newTaroTreeStore(t, test.name)
+
 			require.NoError(t, store.Update(context.Background(),
 				func(tx mssmt.TreeStoreUpdateTx) error {
+					// An empty tree should have a root
+					// hash of the empty hash.
+					dbRoot, err := tx.RootNode()
+					require.NoError(t, err)
+					require.Equal(
+						t, mssmt.EmptyTree[0], dbRoot,
+					)
+
 					require.NoError(t, tx.InsertLeaf(l1))
 					require.NoError(t, tx.InsertLeaf(l2))
 					require.NoError(
@@ -172,13 +186,11 @@ func TestTreeDeletion(t *testing.T) {
 					n1, n2, err := tx.GetChildren(
 						test.root, rootKey,
 					)
-
 					require.NoError(t, err)
 
 					assertNodesEq(
 						t, test.branch.Left, n1,
 					)
-
 					assertNodesEq(
 						t, test.branch.Right, n2,
 					)
@@ -237,6 +249,10 @@ func TestTreeInsertion(t *testing.T) {
 	l2 := mssmt.NewLeafNode([]byte{4, 5, 6}, 2)
 	l3 := mssmt.NewLeafNode([]byte{7, 8, 9}, 3)
 	l4 := mssmt.NewLeafNode([]byte{10, 11, 12}, 4)
+	_ = l1.NodeHash()
+	_ = l2.NodeHash()
+	_ = l3.NodeHash()
+	_ = l4.NodeHash()
 
 	// Compacted leaves are scattered in the tree.
 	k1 := [32]byte{1}
@@ -252,6 +268,9 @@ func TestTreeInsertion(t *testing.T) {
 	branchCL1CL2 := mssmt.NewBranch(cl1, cl2)
 	branchCL1CL2CL3 := mssmt.NewBranch(branchCL1CL2, cl3)
 	branchCL4EB := mssmt.NewBranch(cl4, mssmt.EmptyTree[99])
+	_ = branchCL1CL2.NodeHash()
+	_ = branchCL1CL2CL3.NodeHash()
+	_ = branchCL4EB.NodeHash()
 
 	// These branches are on level 255.
 	el := mssmt.EmptyTree[256]
@@ -259,10 +278,16 @@ func TestTreeInsertion(t *testing.T) {
 	branchL3L4 := mssmt.NewBranch(l3, l4)
 	branchL1EL := mssmt.NewBranch(l1, el)
 	branchELL1 := mssmt.NewBranch(el, l1)
+	_ = branchL1L2.NodeHash()
+	_ = branchL3L4.NodeHash()
+	_ = branchL1EL.NodeHash()
+	_ = branchELL1.NodeHash()
 
 	// These branches are on level 254.
 	branchL1L2EB := mssmt.NewBranch(branchL1L2, mssmt.EmptyTree[255])
 	branchEBL3L4 := mssmt.NewBranch(mssmt.EmptyTree[255], branchL3L4)
+	_ = branchL1L2EB.NodeHash()
+	_ = branchEBL3L4.NodeHash()
 
 	tests := []struct {
 		name            string
@@ -514,10 +539,18 @@ func TestTreeInsertion(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, _, cleanUp := newTaroTreeStore(t)
-			defer cleanUp()
+			store, _ := newTaroTreeStore(t, test.name)
+
 			require.NoError(t, store.Update(context.Background(),
 				func(tx mssmt.TreeStoreUpdateTx) error {
+					// An empty tree should have a root
+					// hash of the empty hash.
+					dbRoot, err := tx.RootNode()
+					require.NoError(t, err)
+					require.Equal(
+						t, mssmt.EmptyTree[0], dbRoot,
+					)
+
 					for _, leaf := range test.leaves {
 						require.NoError(t,
 							tx.InsertLeaf(leaf),
@@ -573,4 +606,82 @@ func TestTreeInsertion(t *testing.T) {
 			))
 		})
 	}
+}
+
+// TestTreeNamespaceIsolation tests that we're able to query for distinct trees
+// on disk.
+func TestTreeNamespaceIsolation(t *testing.T) {
+	t.Parallel()
+
+	name1 := "test1"
+	name2 := "test2"
+
+	// We'll use a simple tree that only has one leaf. The only leaf is a
+	// compacted leaf which sits up at the very top of the tree.
+	leafValue := []byte("kek")
+	leaf := mssmt.NewLeafNode(leafValue, 2)
+	leafHash := [32]byte(leaf.NodeHash())
+	compactedLeaf := mssmt.NewCompactedLeafNode(1, &leafHash, leaf)
+	root := mssmt.NewBranch(compactedLeaf, mssmt.EmptyTree[1])
+
+	store1, _ := newTaroTreeStore(t, name1)
+	store2, _ := newTaroTreeStore(t, name2)
+
+	// With both stores created, we'll insert the left and right branches
+	// of the root, then the root itself.
+	ctxb := context.Background()
+	err := store1.Update(ctxb, func(tx mssmt.TreeStoreUpdateTx) error {
+		if err := tx.InsertCompactedLeaf(compactedLeaf); err != nil {
+			return err
+		}
+		if err := tx.InsertBranch(root); err != nil {
+			return err
+		}
+
+		if err := tx.UpdateRoot(root); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// The second store should still be untouched, returning the empty tree
+	// root hash.
+	err = store2.View(ctxb, func(tx mssmt.TreeStoreViewTx) error {
+		dbRoot, err := tx.RootNode()
+		require.NoError(t, err)
+		require.Equal(
+			t, mssmt.EmptyTree[0], dbRoot,
+		)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// The root hash of the first store should match the root above.
+	err = store1.View(ctxb, func(tx mssmt.TreeStoreViewTx) error {
+		dbRoot, err := tx.RootNode()
+		require.NoError(t, err)
+		assertNodesEq(t, root, dbRoot)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// We'll now update the root hash of the first store again to ensure
+	// the upset logic works.
+	root = mssmt.NewBranch(mssmt.EmptyTree[1], compactedLeaf)
+	err = store1.Update(ctxb, func(tx mssmt.TreeStoreUpdateTx) error {
+		if err := tx.InsertBranch(root); err != nil {
+			return err
+		}
+		return tx.UpdateRoot(root)
+	})
+	require.NoError(t, err)
+	err = store1.View(ctxb, func(tx mssmt.TreeStoreViewTx) error {
+		dbRoot, err := tx.RootNode()
+		require.NoError(t, err)
+		assertNodesEq(t, root, dbRoot)
+		return nil
+	})
+	require.NoError(t, err)
 }

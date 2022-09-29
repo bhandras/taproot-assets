@@ -1,16 +1,16 @@
 package vm
 
 import (
+	"context"
+	"errors"
+
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taro/asset"
 	"github.com/lightninglabs/taro/commitment"
 	"github.com/lightninglabs/taro/mssmt"
-)
-
-var (
-	zeroPrevID asset.PrevID
+	"github.com/lightninglabs/taro/taroscript"
 )
 
 // Engine is a virtual machine capable of executing and verifying Taro asset
@@ -81,8 +81,8 @@ func matchesPrevGenesis(prevID asset.ID, familyKey *asset.FamilyKey,
 func matchesAssetParams(newAsset, prevAsset *asset.Asset,
 	prevAssetWitness *asset.Witness) error {
 
-	scriptKey := prevAsset.ScriptKey.PubKey
-	if !prevAssetWitness.PrevID.ScriptKey.IsEqual(scriptKey) {
+	scriptKey := asset.ToSerialized(prevAsset.ScriptKey.PubKey)
+	if prevAssetWitness.PrevID.ScriptKey != scriptKey {
 		return newErrKind(ErrScriptKeyMismatch)
 	}
 
@@ -119,20 +119,28 @@ func (vm *Engine) validateSplit() error {
 
 	// Split assets should always have a single witness with a non-nil
 	// PrevID and empty TxWitness.
-	if !HasSplitCommitmentWitness(&vm.splitAsset.Asset) {
+	if !vm.splitAsset.Asset.HasSplitCommitmentWitness() {
 		return newErrKind(ErrInvalidSplitCommitmentWitness)
 	}
-	witness := vm.splitAsset.PrevWitnesses[0]
+
+	// We'll use the input of the new asset here, as the splits have a
+	// prevID of zero, as the inherit the prev ID from the root asset.
+	//
+	// TODO(roasbeef): revisit post multi input
+	rootWitness := vm.newAsset.PrevWitnesses[0]
+	splitWitness := vm.splitAsset.PrevWitnesses[0]
 
 	// The prevID of the split commitment should be the ID of the asset
 	// generating the split in the transaction.
 	//
 	// TODO(roasbeef): revisit?
-	prevAsset, ok := vm.prevAssets[*witness.PrevID]
+	prevAsset, ok := vm.prevAssets[*rootWitness.PrevID]
 	if !ok {
-		return newErrKind(ErrNoInputs)
+		return ErrNoInputs
 	}
-	err := matchesAssetParams(&vm.splitAsset.Asset, prevAsset, &witness)
+	err := matchesAssetParams(
+		&vm.splitAsset.Asset, prevAsset, &rootWitness,
+	)
 	if err != nil {
 		return err
 	}
@@ -142,7 +150,7 @@ func (vm *Engine) validateSplit() error {
 	locator := &commitment.SplitLocator{
 		OutputIndex: vm.splitAsset.OutputIndex,
 		AssetID:     vm.splitAsset.Genesis.ID(),
-		ScriptKey:   *vm.splitAsset.ScriptKey.PubKey,
+		ScriptKey:   asset.ToSerialized(vm.splitAsset.ScriptKey.PubKey),
 		Amount:      vm.splitAsset.Amount,
 	}
 	splitNoWitness := vm.splitAsset.Copy()
@@ -152,7 +160,7 @@ func (vm *Engine) validateSplit() error {
 		return err
 	}
 	if !mssmt.VerifyMerkleProof(
-		locator.Hash(), splitLeaf, &witness.SplitCommitment.Proof,
+		locator.Hash(), splitLeaf, &splitWitness.SplitCommitment.Proof,
 		vm.newAsset.SplitCommitmentRoot,
 	) {
 
@@ -170,7 +178,7 @@ func (vm *Engine) validateWitnessV0(virtualTx *wire.MsgTx, inputIdx uint32,
 
 	// We only support version 0 scripts atm.
 	if prevAsset.ScriptVersion != asset.ScriptV0 {
-		return newErrKind(ErrInvalidScriptVersion)
+		return ErrInvalidScriptVersion
 	}
 
 	// An input MUST have a prev out and also a valid witness.
@@ -190,8 +198,9 @@ func (vm *Engine) validateWitnessV0(virtualTx *wire.MsgTx, inputIdx uint32,
 		//
 		// TODO(roasbeef): remove? will go thru normal sig parse
 		// checks, untested as is
+		// TODO: This is wrong
 		if len(witnessItem) == 65 {
-			_, err = schnorr.ParseSignature(witnessItem[:])
+			_, err = schnorr.ParseSignature(witnessItem[1:])
 			if err != nil {
 				// Not a valid signature, so it must be some
 				// arbitrary data push.
@@ -203,15 +212,15 @@ func (vm *Engine) validateWitnessV0(virtualTx *wire.MsgTx, inputIdx uint32,
 
 	// Update the virtual transaction input with details for the specific
 	// Taro input and proceed to validate its witness.
-	virtualTxCopy := virtualTxWithInput(
+	virtualTxCopy := taroscript.VirtualTxWithInput(
 		virtualTx, prevAsset, inputIdx, witness.TxWitness,
 	)
 
-	prevOutFetcher, err := inputPrevOutFetcher(
-		prevAsset.ScriptVersion, prevAsset.ScriptKey.PubKey,
-		prevAsset.Amount,
-	)
+	prevOutFetcher, err := taroscript.InputPrevOutFetcher(*prevAsset)
 	if err != nil {
+		if errors.Is(err, taroscript.ErrInvalidScriptVersion) {
+			return ErrInvalidScriptVersion
+		}
 		return err
 	}
 
@@ -246,7 +255,7 @@ func (vm *Engine) validateWitnessV0(virtualTx *wire.MsgTx, inputIdx uint32,
 func (vm *Engine) validateStateTransition(virtualTx *wire.MsgTx) error {
 	switch {
 	case len(vm.newAsset.PrevWitnesses) == 0:
-		return newErrKind(ErrNoInputs)
+		return ErrNoInputs
 
 	case vm.newAsset.Type == asset.Collectible &&
 		len(vm.newAsset.PrevWitnesses) > 1:
@@ -258,7 +267,7 @@ func (vm *Engine) validateStateTransition(virtualTx *wire.MsgTx) error {
 		witness := witness
 		prevAsset, ok := vm.prevAssets[*witness.PrevID]
 		if !ok {
-			return newErrKind(ErrNoInputs)
+			return ErrNoInputs
 		}
 
 		switch prevAsset.ScriptVersion {
@@ -270,7 +279,7 @@ func (vm *Engine) validateStateTransition(virtualTx *wire.MsgTx) error {
 				return err
 			}
 		default:
-			return newErrKind(ErrInvalidScriptVersion)
+			return ErrInvalidScriptVersion
 		}
 	}
 
@@ -282,7 +291,7 @@ func (vm *Engine) validateStateTransition(virtualTx *wire.MsgTx) error {
 func (vm *Engine) Execute() error {
 	// A genesis asset should have a single witness and a PrevID of all
 	// zeros and empty witness and split commitment proof.
-	if HasGenesisWitness(vm.newAsset) {
+	if vm.newAsset.HasGenesisWitness() {
 		if vm.splitAsset != nil || len(vm.prevAssets) > 0 {
 			return newErrKind(ErrInvalidGenesisStateTransition)
 		}
@@ -301,13 +310,25 @@ func (vm *Engine) Execute() error {
 	// Now that we know we're not dealing with a genesis state transition,
 	// we'll map our set of asset inputs and outputs to the 1-input 1-output
 	// virtual transaction.
-	virtualTx, inputTree, err := VirtualTx(vm.newAsset, vm.prevAssets)
+	virtualTx, inputTree, err := taroscript.VirtualTx(
+		vm.newAsset, vm.prevAssets,
+	)
 	if err != nil {
+		if errors.Is(err, taroscript.ErrInputMismatch) {
+			return ErrInputMismatch
+		}
+		if errors.Is(err, taroscript.ErrNoInputs) {
+			return ErrNoInputs
+		}
 		return err
 	}
 
 	// Enforce that assets aren't being inflated.
-	if inputTree.Root().NodeSum() != uint64(virtualTx.TxOut[0].Value) {
+	treeRoot, err := inputTree.Root(context.Background())
+	if err != nil {
+		return err
+	}
+	if treeRoot.NodeSum() != uint64(virtualTx.TxOut[0].Value) {
 		return newErrKind(ErrAmountMismatch)
 	}
 

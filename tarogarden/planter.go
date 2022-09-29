@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/lightninglabs/taro/asset"
 	"github.com/lightninglabs/taro/chanutils"
+	"github.com/lightninglabs/taro/proof"
 	"github.com/lightningnetwork/lnd/ticker"
 )
 
@@ -35,6 +35,9 @@ type GardenKit struct {
 	// by the genesis point when creating assets that permit on going
 	// emission.
 	GenSigner asset.GenesisSigner
+
+	// ProofFiles stores the set of flat proof files.
+	ProofFiles proof.Archiver
 }
 
 // PlanterConfig is the main config for the ChainPlanter.
@@ -53,14 +56,7 @@ type PlanterConfig struct {
 }
 
 // BatchKey is a type alias for a serialized public key.
-type BatchKey [33]byte
-
-// NewBatchKey creates a new batch key from a public key.
-func NewBatchKey(key *btcec.PublicKey) BatchKey {
-	var b [33]byte
-	copy(b[:], key.SerializeCompressed())
-	return b
-}
+type BatchKey = asset.SerializedKey
 
 type stateRequest interface {
 	Resolve(any)
@@ -148,7 +144,7 @@ func NewChainPlanter(cfg PlanterConfig) *ChainPlanter {
 // newCaretakerForBatch creates a new BatchCaretaker for a given batch and
 // inserts it into the caretaker map.
 func (c *ChainPlanter) newCaretakerForBatch(batch *MintingBatch) *BatchCaretaker {
-	batchKey := NewBatchKey(batch.BatchKey.PubKey)
+	batchKey := asset.ToSerialized(batch.BatchKey.PubKey)
 	caretaker := NewBatchCaretaker(&BatchCaretakerConfig{
 		Batch:     batch,
 		GardenKit: c.cfg.GardenKit,

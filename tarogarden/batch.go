@@ -7,7 +7,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/lightninglabs/taro/commitment"
-	"github.com/lightninglabs/taro/vm"
+	"github.com/lightninglabs/taro/taroscript"
 	"github.com/lightningnetwork/lnd/keychain"
 )
 
@@ -50,6 +50,10 @@ type MintingBatch struct {
 	// mintingPubKey is the top-level Taproot output key that will be
 	// used to commit to the Taro commitment above.
 	mintingPubKey *btcec.PublicKey
+
+	// taroScriptRoot is the root hash of the Taro commitment. If this is
+	// nil, then the mintingPubKey will be as well.
+	taroScriptRoot []byte
 }
 
 // TODO(roasbeef): add batch validate method re unique names?
@@ -69,7 +73,7 @@ func (m *MintingBatch) addSeedling(s *Seedling) error {
 // Taro asset root, thereby creating the set of included assets.
 func (m *MintingBatch) MintingOutputKey() (*btcec.PublicKey, []byte, error) {
 	if m.mintingPubKey != nil {
-		return m.mintingPubKey, nil, nil
+		return m.mintingPubKey, m.taroScriptRoot, nil
 	}
 
 	if m.RootAssetCommitment == nil {
@@ -77,11 +81,13 @@ func (m *MintingBatch) MintingOutputKey() (*btcec.PublicKey, []byte, error) {
 	}
 
 	taroScriptRoot := m.RootAssetCommitment.TapscriptRoot(nil)
+
+	m.taroScriptRoot = taroScriptRoot[:]
 	m.mintingPubKey = txscript.ComputeTaprootOutputKey(
 		m.BatchKey.PubKey, taroScriptRoot[:],
 	)
 
-	return m.mintingPubKey, taroScriptRoot[:], nil
+	return m.mintingPubKey, m.taroScriptRoot, nil
 }
 
 // genesisScript returns the script that should be placed in the minting output
@@ -92,5 +98,5 @@ func (m *MintingBatch) genesisScript() ([]byte, error) {
 		return nil, err
 	}
 
-	return vm.PayToTaprootScript(mintingOutputKey)
+	return taroscript.PayToTaprootScript(mintingOutputKey)
 }

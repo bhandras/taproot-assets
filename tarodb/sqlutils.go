@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"io"
-	"math/rand"
 	"testing"
 
 	"github.com/btcsuite/btcd/wire"
@@ -67,13 +66,13 @@ func readOutPoint(r io.Reader, pver uint32, version int32, op *wire.OutPoint) er
 	return binary.Read(r, binary.LittleEndian, &op.Index)
 }
 
-// mapKeysPtr extracts the set of keys from a map, returning pointers to the
-// specified key.
-func mapKeysPtr[K comparable, V any](m map[K]V) []*K {
-	keys := make([]*K, 0, len(m))
+// fMapKeys extracts the set of keys from a map, applies the function f to each
+// element and returns the results in a new slice.
+func fMapKeys[K comparable, V, R any](m map[K]V, f func(K) R) []R {
+	keys := make([]R, 0, len(m))
 	for k := range m {
-		k := k
-		keys = append(keys, &k)
+		r := f(k)
+		keys = append(keys, r)
 	}
 	return keys
 }
@@ -94,7 +93,7 @@ func noError1[T any, Q any](t *testing.T, f func(Q) (T, error), args Q) T {
 	return v
 }
 
-// fMap takes an input slice, ans applies the function f to each element,
+// fMap takes an input slice, and applies the function f to each element,
 // yielding a new slice.
 func fMap[T1, T2 any](s []T1, f func(T1) T2) []T2 {
 	r := make([]T2, len(s))
@@ -102,9 +101,4 @@ func fMap[T1, T2 any](s []T1, f func(T1) T2) []T2 {
 		r[i] = f(v)
 	}
 	return r
-}
-
-// randInt makes a random integer of the specified type.
-func randInt[T constraints.Integer]() T {
-	return T(rand.Int63()) // nolint:gosec
 }

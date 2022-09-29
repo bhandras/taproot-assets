@@ -15,8 +15,10 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taro/asset"
+	"github.com/lightninglabs/taro/chanutils"
 	"github.com/lightninglabs/taro/commitment"
 	"github.com/lightninglabs/taro/proof"
+	"github.com/lightninglabs/taro/tarodb/sqlite"
 	"github.com/lightninglabs/taro/tarogarden"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/stretchr/testify/require"
@@ -25,9 +27,11 @@ import (
 
 // newAssetStore makes a new instance of the AssetMintingStore backed by sqlite
 // by default.
-func newAssetStore(t *testing.T) (*AssetMintingStore, *AssetStore, *SqliteStore, func()) {
+func newAssetStore(t *testing.T) (*AssetMintingStore, *AssetStore,
+	*SqliteStore) {
+
 	// First, Make a new test database.
-	db, cleanUp := newTestSqliteDB(t)
+	db := NewTestSqliteDB(t)
 
 	// TODO(roasbeef): can use another layer of type params since
 	// duplicated?
@@ -49,7 +53,7 @@ func newAssetStore(t *testing.T) (*AssetMintingStore, *AssetStore, *SqliteStore,
 		db, activeTxCreator,
 	)
 	return NewAssetMintingStore(assetMintingDB), NewAssetStore(assetsDB),
-		db, cleanUp
+		db
 }
 
 // randBool rolls a random boolean.
@@ -129,8 +133,7 @@ func assertSeedlingBatchLen(t *testing.T, batches []*tarogarden.MintingBatch,
 func TestCommitMintingBatchSeedlings(t *testing.T) {
 	t.Parallel()
 
-	assetStore, _, _, cleanUp := newAssetStore(t)
-	defer cleanUp()
+	assetStore, _, _ := newAssetStore(t)
 
 	ctx := context.Background()
 	const numSeedlings = 5
@@ -246,7 +249,8 @@ func seedlingsToAssetRoot(t *testing.T, genesisPoint wire.OutPoint,
 		}
 
 		newAsset, err := asset.New(
-			assetGen, amount, 0, 0, scriptKey, familyKey,
+			assetGen, amount, 0, 0,
+			asset.NewScriptKeyBIP0086(scriptKey), familyKey,
 		)
 		require.NoError(t, err)
 
@@ -342,8 +346,7 @@ func TestAddSproutsToBatch(t *testing.T) {
 
 	ctx := context.Background()
 	const numSeedlings = 5
-	assetStore, _, _, cleanUp := newAssetStore(t)
-	defer cleanUp()
+	assetStore, _, _ := newAssetStore(t)
 
 	// First, we'll create a new batch, then add some sample seedlings.
 	mintingBatch := randSeedlingMintingBatch(t, numSeedlings)
@@ -406,8 +409,7 @@ func addRandAssets(t *testing.T, ctx context.Context,
 func TestCommitBatchChainActions(t *testing.T) {
 	ctx := context.Background()
 	const numSeedlings = 5
-	assetStore, confAssets, db, cleanUp := newAssetStore(t)
-	defer cleanUp()
+	assetStore, confAssets, db := newAssetStore(t)
 
 	// First, we'll create a new batch, then add some sample seedlings, and
 	// then those seedlings as assets.
@@ -456,7 +458,9 @@ func TestCommitBatchChainActions(t *testing.T) {
 	// Now that we have the primary key for the chain transaction inserted
 	// above, we'll use that to confirm that the managed UTXO has been
 	// updated accordingly.
-	managedUTXO, err := db.FetchManagedUTXO(ctx, dbGenTx.TxnID)
+	managedUTXO, err := db.FetchManagedUTXO(ctx, sqlite.FetchManagedUTXOParams{
+		TxnID: sqlInt32(dbGenTx.TxnID),
+	})
 	require.NoError(t, err)
 	require.Equal(t, scriptRoot, managedUTXO.TaroRoot)
 
@@ -475,12 +479,12 @@ func TestCommitBatchChainActions(t *testing.T) {
 
 	// For each asset created above, we'll make a fake proof file for it.
 	assetProofs := make(proof.AssetBlobs)
-	for _, asset := range assetRoot.CommittedAssets() {
+	for _, a := range assetRoot.CommittedAssets() {
 		blob := make([]byte, 100)
 		_, err := rand.Read(blob[:])
 		require.NoError(t, err)
 
-		assetProofs[*asset.ScriptKey.PubKey] = blob
+		assetProofs[asset.ToSerialized(a.ScriptKey.PubKey)] = blob
 	}
 
 	// We'll now conclude the lifetime of a batch by marking it confirmed
@@ -507,9 +511,14 @@ func TestCommitBatchChainActions(t *testing.T) {
 	// back the same number of seedlings.
 	//
 	// TODO(roasbeef): move into isolated test
-	assets, err := confAssets.FetchAllAssets(ctx)
+	assets, err := confAssets.FetchAllAssets(ctx, nil)
 	require.NoError(t, err)
 	require.Equal(t, numSeedlings, len(assets))
+
+	// All the assets returned should have the genesis prev ID set up.
+	for _, dbAsset := range assets {
+		require.True(t, dbAsset.HasGenesisWitness())
+	}
 
 	// Now that the batch has been committed on disk, we should be able to
 	// obtain all the proofs we just committed.
@@ -519,10 +528,58 @@ func TestCommitBatchChainActions(t *testing.T) {
 
 	// If we look up all the proofs by their specific script key, we should
 	// get the same set of proofs.
-	scriptKeys := mapKeysPtr(assetProofs)
+	scriptKeys := fMapKeys(
+		assetProofs, func(k asset.SerializedKey) *btcec.PublicKey {
+			parsed, err := btcec.ParsePubKey(k.CopyBytes())
+			require.NoError(t, err)
+
+			return parsed
+		},
+	)
 	diskProofs, err = confAssets.FetchAssetProofs(ctx, scriptKeys...)
 	require.NoError(t, err)
 	require.Equal(t, assetProofs, diskProofs)
+
+	mintedAssets := assetRoot.CommittedAssets()
+
+	// We'll now query for the set of balances to ensure they all line up
+	// with the assets we just created.
+	assetBalances, err := confAssets.QueryBalancesByAsset(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, numSeedlings, len(assetBalances))
+
+	for _, newAsset := range mintedAssets {
+		assetBalance, ok := assetBalances[newAsset.ID()]
+		require.True(t, ok)
+
+		require.Equal(t, newAsset.Amount, assetBalance.Balance)
+	}
+
+	// We'll also now ensure that if we group by key family, then we're
+	// also able to verify the correct balances.
+	keyFamSumReducer := func(count int, asset *asset.Asset) int {
+		if asset.FamilyKey != nil {
+			return count + 1
+		}
+
+		return count
+	}
+	numKeyFams := chanutils.Reduce(mintedAssets, keyFamSumReducer)
+	assetBalancesByFam, err := confAssets.QueryAssetBalancesByFamily(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, numKeyFams, len(assetBalancesByFam))
+
+	for _, newAsset := range mintedAssets {
+		if newAsset.FamilyKey == nil {
+			continue
+		}
+
+		famKey := asset.ToSerialized(&newAsset.FamilyKey.FamKey)
+		assetBalance, ok := assetBalancesByFam[famKey]
+		require.True(t, ok)
+
+		require.Equal(t, newAsset.Amount, assetBalance.Balance)
+	}
 }
 
 // TestDuplicateFamilyKey tests that if we attempt to insert a family key with
@@ -535,8 +592,7 @@ func TestDuplicateFamilyKey(t *testing.T) {
 
 	// First, we'll open up a new asset store, we only need the raw DB
 	// pointer, as we'll be doing some lower level access in this test.
-	_, _, db, cleanUp := newAssetStore(t)
-	defer cleanUp()
+	_, _, db := newAssetStore(t)
 
 	// Now that we have the DB, we'll insert a new random internal key, and
 	// then a key family linked to that internal key.

@@ -78,9 +78,15 @@ func NewTaroCommitment(assets ...*AssetCommitment) (*TaroCommitment, error) {
 
 		assetCommitments[key] = asset
 	}
+
+	root, err := tree.Root(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
 	return &TaroCommitment{
 		Version:          maxVersion,
-		TreeRoot:         tree.Root(),
+		TreeRoot:         root,
 		assetCommitments: assetCommitments,
 		tree:             tree,
 	}, nil
@@ -104,7 +110,11 @@ func (c *TaroCommitment) Update(asset *AssetCommitment, deletion bool) error {
 			return err
 		}
 
-		c.TreeRoot = c.tree.Root()
+		c.TreeRoot, err = c.tree.Root(context.TODO())
+		if err != nil {
+			return err
+		}
+
 		delete(c.assetCommitments, key)
 	} else {
 		leaf := asset.TaroCommitmentLeaf()
@@ -113,7 +123,11 @@ func (c *TaroCommitment) Update(asset *AssetCommitment, deletion bool) error {
 			return err
 		}
 
-		c.TreeRoot = c.tree.Root()
+		c.TreeRoot, err = c.tree.Root(context.TODO())
+		if err != nil {
+			return err
+		}
+
 		c.assetCommitments[key] = asset
 	}
 
@@ -157,6 +171,7 @@ func (c *TaroCommitment) TapscriptRoot(sibling *chainhash.Hash) chainhash.Hash {
 		return txscript.AssembleTaprootScriptTree(commitmentLeaf).
 			RootNode.TapHash()
 	}
+
 	// TODO: Expose an easy way to construct merkle proofs for this
 	// type of tree. If `sibling` is the root of a tapscript tree,
 	// then it's as simple as computing the control block for said

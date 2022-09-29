@@ -27,7 +27,7 @@ type TxMerkleProof struct {
 // within a block's set of transactions.
 func NewTxMerkleProof(txs []*wire.MsgTx, txIdx int) (*TxMerkleProof, error) {
 	if len(txs) <= txIdx {
-		return nil, errors.New("invalid transcation index for block")
+		return nil, errors.New("invalid transaction index for block")
 	}
 	blockTxs := make([]*btcutil.Tx, 0, len(txs))
 	for _, tx := range txs {
@@ -62,10 +62,12 @@ func NewTxMerkleProof(txs []*wire.MsgTx, txIdx int) (*TxMerkleProof, error) {
 			// If we are the left child, a right sibling may not
 			// exist.
 			hash := hashes[currentIdx+1]
-			if hash == nil {
-				sibling = *hashes[currentIdx]
-			} else {
+			if hash != nil {
 				sibling = *hash
+			} else if hashes[currentIdx] == nil {
+				return nil, errors.New("invalid merkle tree")
+			} else {
+				sibling = *hashes[currentIdx]
 			}
 		} else {
 			// If we are the right child, there'll always be a left
@@ -80,7 +82,7 @@ func NewTxMerkleProof(txs []*wire.MsgTx, txIdx int) (*TxMerkleProof, error) {
 		if level == 0 {
 			nextLevelOffset = nextPoT // Avoids division by 0.
 		} else {
-			nextLevelOffset = nextPoT / (level * 2)
+			nextLevelOffset = (nextPoT >> level)
 		}
 		hashes = hashes[nextLevelOffset:]
 

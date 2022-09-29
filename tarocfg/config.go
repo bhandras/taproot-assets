@@ -55,6 +55,10 @@ const (
 	// determine when a set of pending assets should be flushed into a new
 	// batch.
 	defaultBatchMintingInterval = time.Minute * 10
+
+	// defaultHashMailAddr is the default address we'll use to deliver
+	// optionally deliver proofs for asynchronous sends.
+	defaultHashMailAddr = "mailbox.terminal.lightning.today:443"
 )
 
 var (
@@ -116,7 +120,7 @@ var (
 // ChainConfig houses the configuration options that govern which chain/network
 // we operate on.
 type ChainConfig struct {
-	Network string `long:"network" description:"network to run on" choice:"regtest" choice:"testnet" choice:"mainnet" choice:"simnet"`
+	Network string `long:"network" description:"network to run on" choice:"regtest" choice:"testnet" choice:"simnet"`
 
 	SigNetChallenge string `long:"signetchallenge" description:"Connect to a custom signet network defined by this challenge instead of using the global default signet test network -- Can be specified multiple times"`
 }
@@ -185,6 +189,8 @@ type Config struct {
 
 	BatchMintingInterval time.Duration `long:"batch-minting-interval" description:"A duration (1m, 2h, etc) that governs how frequently pending assets are gather into a batch to be minted."`
 
+	HashMailAddr string `long:"hashmailaddr" description:"The full host:port that should be used to optionally deliver proofs files for asynchronous sends"`
+
 	ChainConf *ChainConfig
 	RpcConf   *RpcConfig
 
@@ -235,6 +241,7 @@ func DefaultConfig() Config {
 		},
 		LogWriter:            build.NewRotatingLogWriter(),
 		BatchMintingInterval: defaultBatchMintingInterval,
+		HashMailAddr:         defaultHashMailAddr,
 	}
 }
 
@@ -242,10 +249,10 @@ func DefaultConfig() Config {
 // line options.
 //
 // The configuration proceeds as follows:
-// 	1) Start with a default config with sane settings
-// 	2) Pre-parse the command line to check for an alternative config file
-// 	3) Load configuration file overwriting defaults with any specified options
-// 	4) Parse CLI options and overwrite/add any specified options
+//  1. Start with a default config with sane settings
+//  2. Pre-parse the command line to check for an alternative config file
+//  3. Load configuration file overwriting defaults with any specified options
+//  4. Parse CLI options and overwrite/add any specified options
 func LoadConfig(interceptor signal.Interceptor) (*Config, btclog.Logger, error) {
 	// Pre-parse the command line options to pick up an alternative config
 	// file.
@@ -415,8 +422,6 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor) (*Config,
 	// network flags passed; assign active network params
 	// while we're at it.
 	switch cfg.ChainConf.Network {
-	case "mainnet":
-		cfg.ActiveNetParams = chaincfg.MainNetParams
 	case "testnet":
 		cfg.ActiveNetParams = chaincfg.TestNet3Params
 	case "regtest":

@@ -1,7 +1,6 @@
 package address
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"math/rand"
 	"testing"
@@ -9,45 +8,19 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/taro/asset"
-	"github.com/lightninglabs/taro/commitment"
-	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	hashBytes1 = [32]byte{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1}
 	invalidHrp     = "bc"
 	invalidNet     = ChainParams{&chaincfg.MainNetParams, invalidHrp}
 	pubKeyBytes, _ = hex.DecodeString(
-		"a0afeb165f0ec36880b68e0baabd9ad9c62fd1a69aa998bc30e9a346202e078f",
+		"a0afeb165f0ec36880b68e0baabd9ad9c62fd1a69aa998bc30e9a346202e" +
+			"078f",
 	)
 	pubKey, _ = schnorr.ParsePubKey(pubKeyBytes)
 )
-
-func randKey(t *testing.T) *btcec.PrivateKey {
-	t.Helper()
-	key, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	return key
-}
-
-func randGenesis(t *testing.T, assetType asset.Type) asset.Genesis {
-	t.Helper()
-
-	return asset.Genesis{
-		FirstPrevOut: wire.OutPoint{},
-		Tag:          "",
-		Metadata:     []byte{},
-		OutputIndex:  rand.Uint32(),
-		Type:         assetType,
-	}
-}
 
 func randAddress(t *testing.T, net *ChainParams, famKey bool,
 	amt *uint64, assetType asset.Type) (*Taro, error) {
@@ -72,10 +45,8 @@ func randAddress(t *testing.T, net *ChainParams, famKey bool,
 	pubKeyCopy1 := *pubKey
 	pubKeyCopy2 := *pubKey
 
-	return New(
-		hashBytes1, familyKey, pubKeyCopy1, pubKeyCopy2, amount,
-		assetType, net,
-	)
+	genesis := asset.RandGenesis(t, assetType)
+	return New(genesis, familyKey, pubKeyCopy1, pubKeyCopy2, amount, net)
 }
 
 func randEncodedAddress(t *testing.T, net *ChainParams, famKey bool,
@@ -99,12 +70,11 @@ func randEncodedAddress(t *testing.T, net *ChainParams, famKey bool,
 	newAddr := Taro{
 		ChainParams: net,
 		Version:     asset.Version(TaroScriptVersion),
-		ID:          hashBytes1,
+		Genesis:     asset.RandGenesis(t, assetType),
 		FamilyKey:   familyKey,
 		ScriptKey:   pubKeyCopy1,
 		InternalKey: pubKeyCopy2,
 		Amount:      amount,
-		Type:        asset.Normal,
 	}
 
 	encodedAddr, err := newAddr.EncodeAddress()
@@ -184,18 +154,6 @@ func TestNewAddress(t *testing.T) {
 			},
 			err: ErrUnsupportedHRP,
 		},
-		{
-			name: "invalid asset type",
-			f: func() (*Taro, error) {
-				pubKeyCopy1 := *pubKey
-				pubKeyCopy2 := *pubKey
-				return New(
-					hashBytes1, nil, pubKeyCopy1, pubKeyCopy2,
-					rand.Uint64(), 2, &MainNetTaro,
-				)
-			},
-			err: ErrUnsupportedAssetType,
-		},
 	}
 
 	for _, testCase := range testCases {
@@ -215,45 +173,6 @@ func TestNewAddress(t *testing.T) {
 			return
 		}
 	}
-}
-
-// TestPayToAddrScript tests edge cases around creating a P2TR script with
-// PayToAddrScript.
-func TestPayToAddrScript(t *testing.T) {
-	t.Parallel()
-
-	normalAmt1 := 5
-	genesis1 := randGenesis(t, asset.Normal)
-	receiverKey1 := randKey(t)
-	receiverPubKey1 := receiverKey1.PubKey()
-	receiver1Descriptor := keychain.KeyDescriptor{PubKey: receiverPubKey1}
-
-	inputAsset1, err := asset.New(
-		genesis1, uint64(normalAmt1), 1, 1, receiver1Descriptor, nil,
-	)
-	require.NoError(t, err)
-	inputAsset1AssetTree, err := commitment.NewAssetCommitment(inputAsset1)
-	require.NoError(t, err)
-	inputAsset1TaroTree, err := commitment.NewTaroCommitment(
-		inputAsset1AssetTree,
-	)
-	require.NoError(t, err)
-
-	scriptNoSibling, err := PayToAddrScript(
-		*receiverPubKey1, nil, *inputAsset1TaroTree,
-	)
-	require.NoError(t, err)
-	require.Equal(t, scriptNoSibling[0], byte(txscript.OP_1))
-	require.Equal(t, scriptNoSibling[1], byte(sha256.Size))
-
-	sibling, err := chainhash.NewHash(hashBytes1[:])
-	require.NoError(t, err)
-	scriptWithSibling, err := PayToAddrScript(
-		*receiverPubKey1, sibling, *inputAsset1TaroTree,
-	)
-	require.NoError(t, err)
-	require.Equal(t, scriptWithSibling[0], byte(txscript.OP_1))
-	require.Equal(t, scriptWithSibling[1], byte(sha256.Size))
 }
 
 func TestAddressEncoding(t *testing.T) {
