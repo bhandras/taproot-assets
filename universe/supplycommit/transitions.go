@@ -398,7 +398,7 @@ func newRootCommitment(ctx context.Context,
 	wallet Wallet, keyRing KeyRing,
 	chainParams chaincfg.Params) (*RootCommitment, *psbt.Packet, error) {
 
-	newCommitTx := wire.NewMsgTx(2)
+	newCommitTx := wire.NewMsgTx(3)
 
 	// With the set of pre-commits, we'll add them to as inputs into the new
 	// transaction.

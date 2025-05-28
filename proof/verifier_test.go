@@ -155,7 +155,7 @@ func makeV0InclusionProof(t *testing.T, opts ...createProofOpt) ([]*Proof,
 
 	internalKey := test.RandPubKey(t)
 
-	anchorTx := wire.NewMsgTx(2)
+	anchorTx := wire.NewMsgTx(3)
 	anchorTx.TxOut = make([]*wire.TxOut, len(tapCommitments))
 
 	indexes := maps.Keys(tapCommitments)
