@@ -1457,7 +1457,7 @@ func CreateSecondLevelHtlcTx(chanState lnwallet.AuxChanState,
 func FakeCommitTx(fundingOutpoint wire.OutPoint,
 	allocations []*tapsend.Allocation) (*wire.MsgTx, error) {
 
-	fakeCommitTx := wire.NewMsgTx(2)
+	fakeCommitTx := wire.NewMsgTx(3)
 	fakeCommitTx.TxIn = []*wire.TxIn{
 		{
 			PreviousOutPoint: fundingOutpoint,
