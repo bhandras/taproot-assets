@@ -313,7 +313,7 @@ func virtualGenesisTx(newAsset *Asset) (*wire.MsgTx, error) {
 
 	// With our single input and output mapped, we're ready to construct our
 	// virtual transaction.
-	virtualTx := wire.NewMsgTx(2)
+	virtualTx := wire.NewMsgTx(3)
 	virtualTx.AddTxIn(txIn)
 	virtualTx.AddTxOut(txOut)
 	return virtualTx, nil
