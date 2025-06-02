@@ -4362,6 +4362,8 @@ func marshalSendEvent(event fn.Event) (*taprpc.SendEvent, error) {
 				err)
 		}
 	}
+	rpcsLog.Infof("!!! sendEvent(): %v - anchor block height %v\n",
+		e.SendState.String(), e.Transfer.AnchorTxBlockHeight)
 
 	return result, nil
 }
