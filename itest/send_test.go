@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightninglabs/taproot-assets/commitment"
 	"github.com/lightninglabs/taproot-assets/fn"
 	"github.com/lightninglabs/taproot-assets/internal/test"
 	"github.com/lightninglabs/taproot-assets/proof"
@@ -32,6 +33,32 @@ var (
 	transferTypeReceive = tapdevrpc.ProofTransferType_PROOF_TRANSFER_TYPE_RECEIVE
 	timeoutMargin       = 5 * time.Second
 )
+
+// GenTaprootAssetRootFromProof generates the taproot asset root from the proof
+// of the swap.
+func GenTaprootAssetRootFromProof(p *proof.Proof) ([]byte, error) {
+	assetCopy := p.Asset.Copy()
+
+	// version := commitment.TapCommitmentV2
+	assetCommitment, err := commitment.FromAssets(
+		nil, assetCopy,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	assetCommitment, err = commitment.TrimSplitWitnesses(
+		nil, assetCommitment,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	taprootAssetRoot := assetCommitment.TapscriptRoot(nil)
+
+	return taprootAssetRoot[:], nil
+}
 
 // testBasicSendUnidirectional tests that we can properly send assets back and
 // forth between nodes.
@@ -107,6 +134,20 @@ func testBasicSendUnidirectional(t *harnessTest) {
 		)
 		AssertNonInteractiveRecvComplete(t.t, secondTapd, i+1)
 		AssertSendEventsComplete(t.t, bobAddr.ScriptKey, sendEvents)
+
+		transferProof, err := proof.Decode(
+			sendResp.Transfer.Outputs[0].NewProofBlob,
+		)
+		require.NoError(t.t, err)
+
+		taprootAssetRoot, err := GenTaprootAssetRootFromProof(
+			transferProof,
+		)
+
+		require.Equal(t.t,
+			sendResp.Transfer.Outputs[0].Anchor.TaprootAssetRoot,
+			taprootAssetRoot,
+		)
 	}
 
 	broadcastState := tapfreighter.SendStateBroadcast.String()
